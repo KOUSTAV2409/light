@@ -1,0 +1,22 @@
+{
+  "background_color": "#282A36",
+  "text_color": "#F8F8F2",
+  "selected_item_background_color": "#FF79C6",
+  "maximum_width": 775,
+  "maximum_height": 600,
+  "search_bar_height": 50,
+  "result_item_height": 48,
+  "result_item_limit": 25,
+  "search_paths": ["~"],
+  "blocked_paths": [
+    "/proc",
+    "/sys",
+    "/dev",
+    "/run",
+    "/usr/lib",
+    "/usr/share"
+  ],
+  "activation_hotkey": "alt+space",
+  "default_search_engine": "google",
+  "show_icons": true
+}

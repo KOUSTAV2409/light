@@ -1,0 +1,33 @@
+[
+  {
+    "title": "Sleep",
+    "keywords": ["sleep", "suspend"],
+    "command": "systemctl suspend",
+    "icon_name": "system-suspend"
+  },
+  {
+    "title": "Restart",
+    "keywords": ["restart", "reboot"],
+    "command": "systemctl reboot",
+    "icon_name": "system-reboot"
+  },
+  {
+    "title": "Shut down",
+    "keywords": ["shutdown", "poweroff", "shut down"],
+    "command": "systemctl poweroff",
+    "icon_name": "system-shutdown"
+  },
+  {
+    "title": "Lock",
+    "keywords": ["lock", "screen"],
+    "command": "loginctl lock-session",
+    "icon_name": "system-lock-screen"
+  },
+  {
+    "title": "Terminal",
+    "keywords": ["terminal", "shell"],
+    "command": "x-terminal-emulator",
+    "accepts_arguments": true,
+    "icon_name": "utilities-terminal"
+  }
+]
