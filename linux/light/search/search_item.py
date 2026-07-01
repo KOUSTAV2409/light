@@ -16,6 +16,8 @@ class SearchItem:
     keywords: list[str] = field(default_factory=list)
     accepts_arguments: bool = False
     path: str = ""
+    is_instant_answer: bool = False
+    answer_text: str = ""
     id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:

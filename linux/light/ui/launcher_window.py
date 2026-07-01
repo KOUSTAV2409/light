@@ -22,6 +22,7 @@ class LauncherWindow(Gtk.Window):
         self._config = config
         self._engine = engine
         self._results: list[SearchItem] = []
+        self._result_rows: list[Gtk.EventBox] = []
         self._selected_index = 0
         self._search_generation = 0
         self._search_timeout_id = 0
@@ -38,6 +39,9 @@ class LauncherWindow(Gtk.Window):
         window {{
             background-color: {config.background_color};
         }}
+        .search-shell {{
+            background-color: {config.background_color};
+        }}
         entry {{
             background-color: {config.background_color};
             color: {config.text_color};
@@ -45,24 +49,44 @@ class LauncherWindow(Gtk.Window):
             padding: 12px 16px;
             font-size: 18px;
         }}
-        listbox {{
+        .results-panel {{
             background-color: {config.background_color};
-            color: {config.text_color};
         }}
-        listbox row {{
+        .results-separator {{
+            background-color: rgba(248, 248, 242, 0.15);
+            min-height: 1px;
+        }}
+        .result-row {{
+            background-color: {config.background_color};
             padding: 8px 12px;
-            border: none;
         }}
-        listbox row:selected {{
+        .result-row.selected {{
             background-color: {config.selected_item_background_color};
+        }}
+        .answer-row {{
+            background-color: {config.background_color};
+            padding: 12px 14px;
+        }}
+        .answer-row.selected {{
+            background-color: {config.selected_item_background_color};
+        }}
+        .answer-body {{
+            font-size: 14px;
             color: {config.text_color};
+        }}
+        .answer-source {{
+            font-size: 11px;
+            color: {config.text_color};
+            opacity: 0.6;
         }}
         .result-title {{
             font-size: 15px;
             font-weight: 600;
+            color: {config.text_color};
         }}
         .result-subtitle {{
             font-size: 12px;
+            color: {config.text_color};
             opacity: 0.75;
         }}
         """
@@ -79,26 +103,27 @@ class LauncherWindow(Gtk.Window):
         self._entry.connect("changed", self._on_text_changed)
         self._entry.connect("activate", self._on_activate)
 
-        scrolled = Gtk.ScrolledWindow()
-        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        scrolled.set_no_show_all(True)
-        scrolled.hide()
-        self._scrolled = scrolled
+        self._results_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._results_panel.get_style_context().add_class("results-panel")
+        self._results_panel.hide()
 
-        self._listbox = Gtk.ListBox()
-        self._listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
-        self._listbox.connect("row-activated", self._on_row_activated)
-        scrolled.add(self._listbox)
+        separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+        separator.get_style_context().add_class("results-separator")
+        self._results_panel.pack_start(separator, False, False, 0)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        box.pack_start(self._entry, False, False, 0)
-        box.pack_start(scrolled, True, True, 0)
-        self.add(box)
+        self._results_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._results_panel.pack_start(self._results_box, False, False, 0)
+
+        shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        shell.get_style_context().add_class("search-shell")
+        shell.pack_start(self._entry, False, False, 0)
+        shell.pack_start(self._results_panel, False, False, 0)
+        self.add(shell)
 
         self.connect("key-press-event", self._on_key_pressed)
 
     def center_on_screen(self) -> None:
-        self.resize(self._config.maximum_width, self._config.search_bar_height)
+        self._resize_window()
         display = Gdk.Display.get_default()
         if display is None:
             return
@@ -110,6 +135,29 @@ class LauncherWindow(Gtk.Window):
         x = geometry.x + max(0, (geometry.width - width) // 2)
         y = geometry.y + max(0, (geometry.height - height) // 4)
         self.move(x, y)
+
+    def _window_height(self) -> int:
+        if not self._results:
+            return self._config.search_bar_height
+        results_height = sum(self._row_height(item) for item in self._results)
+        results_height = min(
+            self._config.maximum_height - self._config.search_bar_height,
+            results_height,
+        )
+        return self._config.search_bar_height + results_height
+
+    def _row_height(self, item: SearchItem) -> int:
+        if item.is_instant_answer:
+            text = item.answer_text or item.subtitle
+            lines = min(5, max(2, len(text) // 75 + 1))
+            return self._config.result_item_height + (lines - 1) * 22
+        return self._config.result_item_height
+
+    def _resize_window(self) -> None:
+        width = self._config.maximum_width
+        height = self._window_height()
+        self.set_size_request(width, height)
+        self.resize(width, height)
 
     def focus_search(self) -> None:
         self._entry.grab_focus()
@@ -153,19 +201,54 @@ class LauncherWindow(Gtk.Window):
         self._selected_index = 0
         self._render_results()
 
-        if not self._engine.should_search_files(query):
+        if self._engine.should_fetch_instant_answer(query):
+            threading.Thread(
+                target=self._fetch_instant_answer_background,
+                args=(generation, query),
+                daemon=True,
+            ).start()
+
+        if self._engine.should_search_files(query):
+            threading.Thread(
+                target=self._fetch_files_background,
+                args=(generation, query),
+                daemon=True,
+            ).start()
+
+        return False
+
+    def _fetch_instant_answer_background(self, generation: int, query: str) -> None:
+        answer_item = self._engine.fetch_instant_answer_item(query)
+        GLib.idle_add(self._apply_instant_answer, generation, query, answer_item)
+
+    def _fetch_files_background(self, generation: int, query: str) -> None:
+        file_results = self._engine.search_files_only(query)
+        GLib.idle_add(self._apply_file_results, generation, query, file_results)
+
+    def _current_answer_item(self) -> SearchItem | None:
+        for item in self._results:
+            if item.is_instant_answer:
+                return item
+        return None
+
+    def _apply_instant_answer(
+        self,
+        generation: int,
+        query: str,
+        answer_item: SearchItem | None,
+    ) -> bool:
+        if generation != self._search_generation:
+            return False
+        if query != self._pending_query:
+            return False
+        if answer_item is None:
             return False
 
-        def search_in_background() -> None:
-            file_results = self._engine.search_files_only(query)
-            GLib.idle_add(
-                self._apply_file_results,
-                generation,
-                query,
-                file_results,
-            )
-
-        threading.Thread(target=search_in_background, daemon=True).start()
+        fast_results = self._engine.search_fast(query)
+        file_items = [item for item in self._results if item.path]
+        self._results = self._engine.merge_results(fast_results, file_items, answer_item)
+        self._selected_index = 0
+        self._render_results()
         return False
 
     def _apply_file_results(
@@ -180,56 +263,90 @@ class LauncherWindow(Gtk.Window):
             return False
 
         fast_results = self._engine.search_fast(query)
-        self._results = self._engine.merge_results(fast_results, file_results)
+        answer_item = self._current_answer_item()
+        self._results = self._engine.merge_results(fast_results, file_results, answer_item)
         self._selected_index = min(self._selected_index, max(0, len(self._results) - 1))
         self._render_results()
         return False
 
-    def _clear_listbox(self) -> None:
-        for row in self._listbox.get_children():
-            self._listbox.remove(row)
-        self._scrolled.hide()
-        self.resize(self._config.maximum_width, self._config.search_bar_height)
+    def _clear_result_rows(self) -> None:
+        for row in self._result_rows:
+            self._results_box.remove(row)
+        self._result_rows = []
 
     def _clear_results(self) -> None:
         self._results = []
         self._selected_index = 0
-        self._clear_listbox()
+        self._clear_result_rows()
+        self._results_panel.hide()
+        self._resize_window()
 
-    def _render_results(self) -> None:
-        self._clear_listbox()
-        if not self._results:
-            return
+    def _build_result_row(self, index: int, item: SearchItem) -> Gtk.EventBox:
+        row = Gtk.EventBox()
+        row.set_visible_window(True)
+        row.set_size_request(-1, self._row_height(item))
 
-        for index, item in enumerate(self._results):
-            row = Gtk.ListBoxRow()
-            row_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            row_box.set_margin_top(4)
-            row_box.set_margin_bottom(4)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.set_margin_top(4)
+        box.set_margin_bottom(4)
+
+        if item.is_instant_answer:
+            row.get_style_context().add_class("answer-row")
 
             title = Gtk.Label(label=item.title, xalign=0)
             title.get_style_context().add_class("result-title")
             title.set_ellipsize(Pango.EllipsizeMode.END)
-            row_box.pack_start(title, False, False, 0)
+            box.pack_start(title, False, False, 0)
+
+            answer = Gtk.Label(label=item.answer_text or item.subtitle, xalign=0)
+            answer.get_style_context().add_class("answer-body")
+            answer.set_line_wrap(True)
+            answer.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            answer.set_max_width_chars(88)
+            box.pack_start(answer, False, False, 0)
+
+            source = Gtk.Label(label="Press Enter to open source", xalign=0)
+            source.get_style_context().add_class("answer-source")
+            box.pack_start(source, False, False, 0)
+        else:
+            row.get_style_context().add_class("result-row")
+
+            title = Gtk.Label(label=item.title, xalign=0)
+            title.get_style_context().add_class("result-title")
+            title.set_ellipsize(Pango.EllipsizeMode.END)
+            box.pack_start(title, False, False, 0)
 
             subtitle_text = item.subtitle or item.path
             if subtitle_text:
                 subtitle = Gtk.Label(label=subtitle_text, xalign=0)
                 subtitle.get_style_context().add_class("result-subtitle")
                 subtitle.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-                row_box.pack_start(subtitle, False, False, 0)
+                box.pack_start(subtitle, False, False, 0)
 
-            row.add(row_box)
-            row.set_name(str(index))
-            self._listbox.add(row)
+        row.add(box)
+        row.connect("button-press-event", self._on_row_pressed, index)
+        return row
 
-        self._listbox.show_all()
-        height = min(
-            self._config.maximum_height,
-            self._config.search_bar_height + len(self._results) * self._config.result_item_height,
-        )
-        self.resize(self._config.maximum_width, height)
-        self._scrolled.show()
+    def _on_row_pressed(self, _widget: Gtk.EventBox, _event, index: int) -> bool:
+        self._select_row(index)
+        self._activate_selected()
+        return True
+
+    def _render_results(self) -> None:
+        self._clear_result_rows()
+        if not self._results:
+            self._results_panel.hide()
+            self._resize_window()
+            return
+
+        for index, item in enumerate(self._results):
+            row = self._build_result_row(index, item)
+            self._results_box.pack_start(row, False, False, 0)
+            self._result_rows.append(row)
+
+        self._results_panel.show()
+        self._results_box.show_all()
+        self._resize_window()
         self._select_row(self._selected_index)
 
     def _select_row(self, index: int) -> None:
@@ -237,9 +354,12 @@ class LauncherWindow(Gtk.Window):
             return
         index = max(0, min(index, len(self._results) - 1))
         self._selected_index = index
-        row = self._listbox.get_row_at_index(index)
-        if row:
-            self._listbox.select_row(row)
+        for i, row in enumerate(self._result_rows):
+            style = row.get_style_context()
+            if i == index:
+                style.add_class("selected")
+            else:
+                style.remove_class("selected")
 
     def _activate_selected(self) -> None:
         if not self._results:
@@ -249,13 +369,9 @@ class LauncherWindow(Gtk.Window):
         self.get_application().hide_launcher()  # type: ignore[attr-defined]
 
     def _on_activate(self, *_args) -> None:
+        if not self._results and self._pending_query.strip():
+            self._run_debounced_search()
         self._activate_selected()
-
-    def _on_row_activated(self, _listbox: Gtk.ListBox, row: Gtk.ListBoxRow) -> None:
-        index = row.get_index()
-        if 0 <= index < len(self._results):
-            self._selected_index = index
-            self._activate_selected()
 
     def _on_key_pressed(self, _widget, event: Gdk.EventKey) -> bool:
         keyval = event.keyval

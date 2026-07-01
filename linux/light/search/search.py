@@ -6,6 +6,7 @@ from ..configuration.configuration import Configuration
 from .action_provider import ActionSearch
 from .calculator_provider import maybe_calculator_item
 from .file_provider import search_files
+from .instant_answer_provider import fetch_instant_answer, instant_answer_item
 from .search_item import SearchItem
 from .web_provider import looks_like_url, search_web
 
@@ -64,6 +65,29 @@ class SearchEngine:
 
         return True
 
+    def should_fetch_instant_answer(self, query: str) -> bool:
+        if len(query.strip()) < 3:
+            return False
+        if looks_like_url(query.strip()):
+            return False
+
+        parts = query.split(maxsplit=1)
+        if len(parts) < 2:
+            return False
+
+        calc = maybe_calculator_item(query)
+        if calc is not None and all(ch in "0123456789+-*/(). " for ch in query):
+            return False
+
+        return True
+
+    def fetch_instant_answer_item(self, query: str) -> SearchItem | None:
+        result = fetch_instant_answer(query)
+        if not result:
+            return None
+        title, answer, source_url = result
+        return instant_answer_item(query, title, answer, source_url)
+
     def search_files_only(self, query: str) -> list[SearchItem]:
         return search_files(query, self._config)
 
@@ -74,12 +98,18 @@ class SearchEngine:
             results.extend(self.search_files_only(query))
         return results[: self._config.result_item_limit]
 
-    def merge_results(self, fast: list[SearchItem], files: list[SearchItem]) -> list[SearchItem]:
-        """Insert file hits after actions/calculator but before web results."""
-        if not files:
-            return fast[: self._config.result_item_limit]
-
+    def merge_results(
+        self,
+        fast: list[SearchItem],
+        files: list[SearchItem],
+        answer: SearchItem | None = None,
+    ) -> list[SearchItem]:
         web_items = [item for item in fast if item.icon_name in ("web-browser", "system-search")]
         head = [item for item in fast if item not in web_items]
-        merged = head + files + web_items
+        merged: list[SearchItem] = []
+        if answer:
+            merged.append(answer)
+        merged.extend(head)
+        merged.extend(files)
+        merged.extend(web_items)
         return merged[: self._config.result_item_limit]
