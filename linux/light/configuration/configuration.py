@@ -7,7 +7,6 @@ import os
 import shutil
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Any
 
 
 def _xdg_config_home() -> Path:
@@ -30,6 +29,8 @@ class Configuration:
     background_color: str = "#282A36"
     text_color: str = "#F8F8F2"
     selected_item_background_color: str = "#FF79C6"
+    answer_background_color: str = "#343746"
+    answer_selected_background_color: str = "#44475A"
     maximum_width: int = 775
     maximum_height: int = 600
     search_bar_height: int = 50
@@ -47,25 +48,59 @@ class Configuration:
     openai_model: str = "gpt-4o"
     openai_web_search: bool = True
 
+    # Local productivity features
+    clipboard_history_enabled: bool = False
+    clipboard_history_limit: int = 50
+    extensions_enabled: bool = True
+    usage_metrics_enabled: bool = False
+
     @classmethod
     def load(cls) -> Configuration:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            CONFIG_DIR.chmod(0o700)
+        except OSError:
+            pass
 
         if not CONFIG_PATH.exists():
-            shutil.copy(BUNDLED_DEFAULT, CONFIG_PATH)
+            try:
+                shutil.copy(BUNDLED_DEFAULT, CONFIG_PATH)
+            except OSError:
+                return cls()
 
-        with CONFIG_PATH.open(encoding="utf-8") as f:
-            data: dict[str, Any] = json.load(f)
+        try:
+            with CONFIG_PATH.open(encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            broken = CONFIG_PATH.with_suffix(".json.broken")
+            try:
+                CONFIG_PATH.replace(broken)
+            except OSError:
+                pass
+            return cls()
+
+        if not isinstance(data, dict):
+            return cls()
 
         defaults = {item.name: getattr(cls(), item.name) for item in fields(cls)}
-        defaults.update({k: v for k, v in data.items() if k in defaults})
+        for key, value in data.items():
+            if key not in defaults:
+                continue
+            expected = type(defaults[key])
+            if expected is type(None) or isinstance(value, expected):
+                defaults[key] = value
+        # API keys belong in secrets/env, never in the persisted config object.
+        defaults["openai_api_key"] = ""
         return cls(**defaults)
 
     def save(self) -> None:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with CONFIG_PATH.open("w", encoding="utf-8") as f:
-            json.dump(asdict(self), f, indent=2)
+        payload = asdict(self)
+        payload.pop("openai_api_key", None)
+        temporary = CONFIG_PATH.with_suffix(".tmp")
+        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(CONFIG_PATH)
 
     def secrets_path(self) -> Path:
         return SECRETS_PATH

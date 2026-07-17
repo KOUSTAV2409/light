@@ -3,28 +3,57 @@
 from __future__ import annotations
 
 import sys
+from typing import Any
 
 import gi
 
 gi.require_version("Gtk", "3.0")
-gi.require_version("AyatanaAppIndicator3", "0.1")
-from gi.repository import AyatanaAppIndicator3 as AppIndicator
-from gi.repository import GLib, Gtk
+from gi.repository import Gio, GLib, Gtk
 
+try:
+    gi.require_version("AyatanaAppIndicator3", "0.1")
+    from gi.repository import AyatanaAppIndicator3 as AppIndicator
+except (ValueError, ImportError):
+    AppIndicator = None  # type: ignore[assignment]
+
+from .clipboard.history import ClipboardHistory
+from .clipboard.manager import ClipboardManager
 from .configuration.configuration import Configuration
 from .keyboard.hotkey import start_global_hotkey
+from .metrics import UsageMetrics
 from .search.search import SearchEngine
 from .ui.launcher_window import LauncherWindow
 
 
 class LightApplication(Gtk.Application):
     def __init__(self) -> None:
-        super().__init__(application_id="com.koustav.light")
+        super().__init__(
+            application_id="com.koustav.light",
+            flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
+        )
         self._config = Configuration.load()
-        self._engine = SearchEngine(self._config)
+        self._clipboard_history = ClipboardHistory(
+            self._config.clipboard_history_limit
+        )
+        self._clipboard_manager = ClipboardManager(self._clipboard_history)
+        self._metrics = UsageMetrics(self._config.usage_metrics_enabled)
+        self._engine = SearchEngine(
+            self._config,
+            clipboard_history=(
+                self._clipboard_history
+                if self._config.clipboard_history_enabled
+                else None
+            ),
+            copy_text=(
+                self._clipboard_manager.copy
+                if self._config.clipboard_history_enabled
+                else None
+            ),
+        )
         self._window: LauncherWindow | None = None
-        self._indicator: AppIndicator.Indicator | None = None
+        self._indicator: Any | None = None
         self._started = False
+        self._toggle_on_activate = False
 
     def do_startup(self) -> None:
         Gtk.Application.do_startup(self)
@@ -39,15 +68,33 @@ class LightApplication(Gtk.Application):
 
     def do_activate(self) -> None:
         self._ensure_started()
-        self.show_launcher()
+        if self._toggle_on_activate:
+            self._toggle_on_activate = False
+            self.toggle_launcher()
+        else:
+            self.show_launcher()
+
+    def do_command_line(self, command_line) -> int:
+        argv = list(command_line.get_arguments())
+        self._toggle_on_activate = "--toggle" in argv
+        self.activate()
+        return 0
 
     def _ensure_started(self) -> None:
         if self._started:
             return
-        self._window = LauncherWindow(self, self._config, self._engine)
+        self._window = LauncherWindow(
+            self,
+            self._config,
+            self._engine,
+            metrics=self._metrics,
+        )
         self._window.connect("delete-event", self._on_delete_event)
         self._setup_tray()
         self._setup_hotkey()
+        if self._config.clipboard_history_enabled:
+            self._clipboard_manager.start()
+        self._metrics.record("launch")
         self._started = True
 
     def _on_delete_event(self, *_args) -> bool:
@@ -77,6 +124,12 @@ class LightApplication(Gtk.Application):
             self.show_launcher()
 
     def _setup_tray(self) -> None:
+        if AppIndicator is None:
+            print(
+                "System tray integration is unavailable; use the global shortcut.",
+                file=sys.stderr,
+            )
+            return
         indicator = AppIndicator.Indicator.new(
             "light-launcher",
             "system-search",
@@ -110,7 +163,7 @@ class LightApplication(Gtk.Application):
 
 
 def run() -> int:
-    # Second instance (e.g. ./run.sh toggle) activates the running app via D-Bus.
-    argv = [arg for arg in sys.argv if arg != "--toggle"]
+    # Second instance (e.g. ./run.sh toggle --toggle) reaches do_command_line
+    # over D-Bus so the primary process can toggle visibility.
     app = LightApplication()
-    return app.run(argv)
+    return app.run(sys.argv)

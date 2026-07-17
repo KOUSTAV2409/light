@@ -19,14 +19,39 @@ USER_ACTIONS = CONFIG_DIR / "actions.json"
 @dataclass
 class ActionDefinition:
     title: str
-    command: str
+    argv: list[str]
     keywords: list[str]
     icon_name: str = "system-run"
     accepts_arguments: bool = False
 
 
-def _run_command(command: str) -> None:
-    subprocess.Popen(command, shell=True, start_new_session=True)
+def _run_argv(argv: list[str]) -> None:
+    if not argv:
+        return
+    try:
+        subprocess.Popen(
+            argv,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return
+
+
+def _parse_argv(entry: dict) -> list[str] | None:
+    argv = entry.get("argv")
+    if isinstance(argv, list) and all(isinstance(part, str) and part for part in argv):
+        return list(argv)
+
+    command = entry.get("command")
+    if not isinstance(command, str) or not command.strip():
+        return None
+    try:
+        parsed = shlex.split(command)
+    except ValueError:
+        return None
+    return parsed or None
 
 
 def _load_actions() -> list[ActionDefinition]:
@@ -34,16 +59,32 @@ def _load_actions() -> list[ActionDefinition]:
     for path in (BUNDLED_ACTIONS, USER_ACTIONS):
         if not path.exists():
             continue
-        with path.open(encoding="utf-8") as f:
-            raw = json.load(f)
+        try:
+            with path.open(encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw, list):
+            continue
         for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            title = entry.get("title")
+            argv = _parse_argv(entry)
+            if not isinstance(title, str) or not title.strip() or not argv:
+                continue
+            keywords = entry.get("keywords", [title])
+            if not isinstance(keywords, list) or not all(
+                isinstance(keyword, str) for keyword in keywords
+            ):
+                keywords = [title]
             actions.append(
                 ActionDefinition(
-                    title=entry["title"],
-                    command=entry["command"],
-                    keywords=entry.get("keywords", [entry["title"]]),
-                    icon_name=entry.get("icon_name", "system-run"),
-                    accepts_arguments=entry.get("accepts_arguments", False),
+                    title=title,
+                    argv=argv,
+                    keywords=keywords,
+                    icon_name=str(entry.get("icon_name", "system-run")),
+                    accepts_arguments=bool(entry.get("accepts_arguments", False)),
                 )
             )
     return actions
@@ -68,18 +109,18 @@ class ActionSearch:
             if not any(_keyword_matches(kw, token) for kw in action.keywords):
                 continue
 
-            command = action.command
+            argv = list(action.argv)
             if action.accepts_arguments and arguments:
-                command = f"{command} {shlex.quote(arguments)}"
+                argv.append(arguments)
 
             items.append(
                 SearchItem(
                     title=action.title,
-                    subtitle=command,
+                    subtitle=shlex.join(argv),
                     icon_name=action.icon_name,
                     keywords=action.keywords,
                     accepts_arguments=action.accepts_arguments,
-                    action=lambda cmd=command: _run_command(cmd),
+                    action=lambda cmd=argv: _run_argv(cmd),
                 )
             )
         return items

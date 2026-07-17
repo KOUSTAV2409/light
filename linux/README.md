@@ -5,13 +5,16 @@ Prototype launcher inspired by [Snap](../README.md). Built with Python 3 + GTK 3
 ## MVP features
 
 - Floating search window (GTK 3)
+- Installed application search via freedesktop `.desktop` entries
 - File search via `fd`, `find`, or Python fallback
 - System actions (sleep, reboot, lock, terminal)
 - Web search + URL open
 - Calculator with safe evaluation
 - Arrow keys, Tab, Enter, Escape navigation
 - System tray icon
-- Global hotkey via system shortcut or optional `keyboard` package
+- Wayland-safe compositor shortcut plus optional `keyboard` fallback
+- Streaming OpenAI answers with source citations
+- Opt-in local clipboard history and process-isolated extensions
 
 ## Requirements
 
@@ -52,14 +55,15 @@ Gtk-Message: Failed to load module "appmenu-gtk-module"
 
 ### Option A — System keyboard shortcut (recommended)
 
-1. Keep Light running: `./run.sh`
-2. Open **Settings → Keyboard → Keyboard Shortcuts → Custom Shortcuts**
-3. Add a shortcut:
-   - Name: `Light`
-   - Command: `/home/koustav/light/linux/run.sh toggle`
-   - Shortcut: `Alt+Space`
+On GNOME/Ubuntu, install it automatically:
 
-`--toggle` talks to the already-running app (single-instance).
+```bash
+./run.sh install-hotkey
+```
+
+On KDE and other compositors, this prints the exact desktop-native command to
+bind. The shortcut invokes Light over D-Bus, so it works reliably on Wayland
+without reading `/dev/input`.
 
 ### Option B — Optional pip package in a venv
 
@@ -78,7 +82,26 @@ On first run, config is copied to:
 ~/.config/light/actions.json      # optional user actions
 ```
 
-## OpenAI answers (current / news questions)
+## File search
+
+Type any filename fragment — including multiple words:
+
+- `readme`
+- `budget report`
+- `invoice 2024`
+
+Light matches files whose path contains **all** words (Raycast/Spotlight-style).
+Results appear under apps/actions; Google stays as a fallback at the bottom.
+
+AI answers are intentional, not automatic for every multi-word query:
+
+- Questions: `who is the ceo of google`
+- Fact lookups: `ceo of google`, `capital of france`
+- Explicit AI: `? latest openai news`
+
+For fact lookups, Light shows the **live answer on top**, then matching local
+files, then Google — Raycast-style parallel results, not exclusive modes.
+
 
 Light can answer questions like Google’s AI Overview using **OpenAI Responses API + `web_search`**.
 
@@ -119,6 +142,59 @@ Then ask: `who is the ceo of whatsapp global`
 
 Flow: OpenAI web search → short answer under the bar → Wikipedia only if OpenAI is off/unavailable.
 
+## Clipboard history
+
+Clipboard history is local-only and disabled by default. Enable it in
+`~/.config/light/configuration.json`:
+
+```json
+"clipboard_history_enabled": true,
+"clipboard_history_limit": 50
+```
+
+Type `clipboard` or `clipboard <filter>` in Light. Entries are stored with mode
+`0600` in `~/.local/share/light/clipboard_history.json`.
+
+## Extensions
+
+Put extensions in `~/.local/share/light/extensions/<id>/manifest.json`:
+
+```json
+{
+  "id": "example",
+  "name": "Example",
+  "prefix": "ex",
+  "description": "Run an external extension",
+  "command": ["/absolute/path/to/extension"]
+}
+```
+
+Typing `ex hello` launches the command with `hello` as its final argument and
+in the `LIGHT_QUERY` environment variable. Commands are arrays and never run
+through a shell.
+
+## Test
+
+```bash
+PYTHONPATH=. python3 -m unittest discover -s tests -t . -v
+```
+
+## Packages
+
+```bash
+./packaging/debian/build-deb.sh 0.1.0
+./packaging/flatpak/build-flatpak.sh
+```
+
+The Debian artifact is written to `dist/`. Flatpak requires `flatpak-builder`
+and the GNOME 48 runtime/SDK.
+
+## Validation metrics
+
+Privacy-safe local counters are disabled by default. Set
+`"usage_metrics_enabled": true`, then run `./run.sh metrics`. Queries, paths,
+clipboard contents, answers, and API keys are never recorded.
+
 ## Project layout (mirrors Snap)
 
 | Snap (macOS) | Light (Linux MVP) |
@@ -134,15 +210,8 @@ Flow: OpenAI web search → short answer under the bar → Wikipedia only if Ope
 ## Known MVP limits
 
 - No Wayland layer-shell overlay yet (regular GTK window)
-- Built-in global hotkey needs venv + `keyboard`, or use system shortcut
+- Automatic Wayland shortcut installation currently targets GNOME; other
+  compositors use the command printed by `./run.sh install-hotkey`
 - File search without `fd`/`find` is shallow and slow
-- No clipboard history or snippet expansion yet
 - Power actions may need polkit permissions
 - OpenAI web search uses your API quota (Responses API + web_search tool)
-
-## Next steps
-
-1. `.desktop` application search
-2. Preferences window
-3. Wayland overlay via `gtk-layer-shell`
-4. Clipboard history

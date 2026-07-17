@@ -1,0 +1,33 @@
+app-id: com.koustav.light
+runtime: org.gnome.Platform
+runtime-version: "48"
+sdk: org.gnome.Sdk
+command: light
+
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --filesystem=home:ro
+  - --filesystem=xdg-config/light:create
+  - --filesystem=xdg-data/light:create
+  - --talk-name=org.freedesktop.portal.Desktop
+
+modules:
+  - name: light
+    buildsystem: simple
+    build-commands:
+      - install -d /app/bin /app/lib/light /app/share/applications
+      - cp -a light /app/lib/light/
+      - install -m 0644 packaging/debian/com.koustav.light.desktop /app/share/applications/com.koustav.light.desktop
+      - |
+        cat > /app/bin/light <<'EOF'
+        #!/usr/bin/env bash
+        export PYTHONPATH="/app/lib/light${PYTHONPATH:+:$PYTHONPATH}"
+        exec python3 -m light "$@"
+        EOF
+      - chmod 0755 /app/bin/light
+    sources:
+      - type: dir
+        path: ../..

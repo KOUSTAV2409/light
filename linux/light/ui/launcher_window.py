@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+from urllib.parse import urlparse
 
 import gi
 
@@ -10,17 +11,26 @@ gi.require_version("Gtk", "3.0")
 from gi.repository import Gdk, GLib, Gtk, Pango
 
 from ..configuration.configuration import Configuration
+from ..metrics import UsageMetrics
 from ..search.search import SearchEngine
+from ..search.file_provider import file_search_loading_item
 from ..search.search_item import SearchItem
 
 
 class LauncherWindow(Gtk.Window):
     DEBOUNCE_MS = 250
 
-    def __init__(self, app: Gtk.Application, config: Configuration, engine: SearchEngine) -> None:
+    def __init__(
+        self,
+        app: Gtk.Application,
+        config: Configuration,
+        engine: SearchEngine,
+        metrics: UsageMetrics | None = None,
+    ) -> None:
         super().__init__(application=app, title="Light", type=Gtk.WindowType.TOPLEVEL)
         self._config = config
         self._engine = engine
+        self._metrics = metrics or UsageMetrics(enabled=False)
         self._results: list[SearchItem] = []
         self._result_rows: list[Gtk.EventBox] = []
         self._selected_index = 0
@@ -64,11 +74,11 @@ class LauncherWindow(Gtk.Window):
             background-color: {config.selected_item_background_color};
         }}
         .answer-row {{
-            background-color: {config.background_color};
+            background-color: {config.answer_background_color};
             padding: 12px 14px;
         }}
         .answer-row.selected {{
-            background-color: {config.selected_item_background_color};
+            background-color: {config.answer_selected_background_color};
         }}
         .answer-body {{
             font-size: 14px;
@@ -88,6 +98,9 @@ class LauncherWindow(Gtk.Window):
             font-size: 12px;
             color: {config.text_color};
             opacity: 0.75;
+        }}
+        .result-icon {{
+            margin-right: 10px;
         }}
         """
         provider = Gtk.CssProvider()
@@ -190,6 +203,7 @@ class LauncherWindow(Gtk.Window):
         if not query:
             return False
 
+        self._metrics.record("search")
         self._search_generation += 1
         generation = self._search_generation
 
@@ -197,16 +211,17 @@ class LauncherWindow(Gtk.Window):
         if generation != self._search_generation:
             return False
 
-        self._results = list(fast_results)
-        self._selected_index = 0
+        answer_item: SearchItem | None = None
+        file_items: list[SearchItem] = []
 
         if self._engine.should_fetch_instant_answer(query):
-            loading = SearchItem(
+            answer_item = SearchItem(
                 title="Looking up answer…",
                 subtitle="Searching the web with OpenAI…"
                 if self._engine.uses_openai_answers
                 else "Fetching from Wikipedia",
                 is_instant_answer=True,
+                is_loading=True,
                 answer_text=(
                     "Searching the web with OpenAI…"
                     if self._engine.uses_openai_answers
@@ -215,17 +230,22 @@ class LauncherWindow(Gtk.Window):
                 icon_name="dialog-information",
                 action=lambda: None,
             )
-            self._results = self._engine.merge_results(fast_results, [], loading)
-            self._render_results()
+
+        if self._engine.should_search_files(query):
+            file_items = [file_search_loading_item()]
+
+        self._results = self._engine.merge_results(fast_results, file_items, answer_item)
+        self._selected_index = 0
+        self._render_results()
+
+        if answer_item is not None:
             threading.Thread(
                 target=self._fetch_instant_answer_background,
                 args=(generation, query),
                 daemon=True,
             ).start()
-        else:
-            self._render_results()
 
-        if self._engine.should_search_files(query):
+        if file_items:
             threading.Thread(
                 target=self._fetch_files_background,
                 args=(generation, query),
@@ -236,8 +256,15 @@ class LauncherWindow(Gtk.Window):
 
     def _fetch_instant_answer_background(self, generation: int, query: str) -> None:
         answer_item: SearchItem | None = None
+
+        def on_delta(text: str) -> None:
+            GLib.idle_add(self._apply_stream_delta, generation, query, text)
+
         try:
-            answer_item = self._engine.fetch_instant_answer_item(query)
+            answer_item = self._engine.fetch_instant_answer_item(
+                query,
+                on_delta=on_delta if self._engine.uses_openai_answers else None,
+            )
         except Exception as exc:
             print(f"Instant answer failed: {exc}", file=__import__("sys").stderr, flush=True)
 
@@ -245,6 +272,34 @@ class LauncherWindow(Gtk.Window):
             return self._apply_instant_answer(generation, query, answer_item)
 
         GLib.idle_add(apply)
+
+    def _apply_stream_delta(
+        self,
+        generation: int,
+        query: str,
+        answer_text: str,
+    ) -> bool:
+        if generation != self._search_generation or not self._same_query(query):
+            return False
+
+        streaming_item = SearchItem(
+            title="OpenAI web answer",
+            subtitle=answer_text,
+            answer_text=answer_text,
+            is_instant_answer=True,
+            icon_name="dialog-information",
+            action=lambda: None,
+        )
+        fast_results = self._engine.search_fast(query)
+        file_items = self._current_file_items()
+        self._results = self._engine.merge_results(
+            fast_results,
+            file_items,
+            streaming_item,
+        )
+        self._selected_index = 0
+        self._render_results()
+        return False
 
     def _fetch_files_background(self, generation: int, query: str) -> None:
         try:
@@ -259,9 +314,20 @@ class LauncherWindow(Gtk.Window):
 
     def _current_answer_item(self) -> SearchItem | None:
         for item in self._results:
-            if item.is_instant_answer and item.title != "Looking up answer…":
+            if item.is_instant_answer:
                 return item
         return None
+
+    def _current_file_items(self) -> list[SearchItem]:
+        """Keep completed file hits and the in-progress file-search row."""
+        files = [item for item in self._results if item.path]
+        if files:
+            return files
+        return [
+            item
+            for item in self._results
+            if item.is_loading and not item.is_instant_answer
+        ]
 
     def _same_query(self, query: str) -> bool:
         return query.strip() == self._pending_query.strip()
@@ -278,7 +344,16 @@ class LauncherWindow(Gtk.Window):
             return False
 
         fast_results = self._engine.search_fast(query)
-        file_items = [item for item in self._results if item.path]
+        file_items = self._current_file_items()
+        if answer_item is None:
+            existing = self._current_answer_item()
+            # Keep a streamed partial/final answer if the final fetch returned empty.
+            if (
+                existing is not None
+                and not existing.is_loading
+                and (existing.answer_text or existing.subtitle)
+            ):
+                answer_item = existing
         self._results = self._engine.merge_results(fast_results, file_items, answer_item)
         self._selected_index = 0
         self._render_results()
@@ -296,6 +371,7 @@ class LauncherWindow(Gtk.Window):
             return False
 
         fast_results = self._engine.search_fast(query)
+        # Preserve in-progress or completed AI row — do not drop "Looking up answer…".
         answer_item = self._current_answer_item()
         self._results = self._engine.merge_results(fast_results, file_results, answer_item)
         self._selected_index = min(self._selected_index, max(0, len(self._results) - 1))
@@ -319,9 +395,9 @@ class LauncherWindow(Gtk.Window):
         row.set_visible_window(True)
         row.set_size_request(-1, self._row_height(item))
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        box.set_margin_top(4)
-        box.set_margin_bottom(4)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        content.set_margin_top(4)
+        content.set_margin_bottom(4)
 
         if item.is_instant_answer:
             row.get_style_context().add_class("answer-row")
@@ -329,34 +405,54 @@ class LauncherWindow(Gtk.Window):
             title = Gtk.Label(label=item.title, xalign=0)
             title.get_style_context().add_class("result-title")
             title.set_ellipsize(Pango.EllipsizeMode.END)
-            box.pack_start(title, False, False, 0)
+            content.pack_start(title, False, False, 0)
 
             answer = Gtk.Label(label=item.answer_text or item.subtitle, xalign=0)
             answer.get_style_context().add_class("answer-body")
             answer.set_line_wrap(True)
             answer.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
             answer.set_max_width_chars(88)
-            box.pack_start(answer, False, False, 0)
+            content.pack_start(answer, False, False, 0)
 
-            source = Gtk.Label(label="Press Enter to open source", xalign=0)
+            domains: list[str] = []
+            for url in item.source_urls:
+                domain = urlparse(url).netloc.removeprefix("www.")
+                if domain and domain not in domains:
+                    domains.append(domain)
+            source_text = " · ".join(domains[:3])
+            if source_text:
+                source_text = f"Sources: {source_text}  ·  Enter to open"
+            else:
+                source_text = "Press Enter to open source"
+            source = Gtk.Label(label=source_text, xalign=0)
             source.get_style_context().add_class("answer-source")
-            box.pack_start(source, False, False, 0)
+            source.set_ellipsize(Pango.EllipsizeMode.END)
+            content.pack_start(source, False, False, 0)
         else:
             row.get_style_context().add_class("result-row")
 
             title = Gtk.Label(label=item.title, xalign=0)
             title.get_style_context().add_class("result-title")
             title.set_ellipsize(Pango.EllipsizeMode.END)
-            box.pack_start(title, False, False, 0)
+            content.pack_start(title, False, False, 0)
 
             subtitle_text = item.subtitle or item.path
             if subtitle_text:
                 subtitle = Gtk.Label(label=subtitle_text, xalign=0)
                 subtitle.get_style_context().add_class("result-subtitle")
                 subtitle.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-                box.pack_start(subtitle, False, False, 0)
+                content.pack_start(subtitle, False, False, 0)
 
-        row.add(box)
+        if self._config.show_icons and not item.is_instant_answer:
+            layout = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+            icon = Gtk.Image.new_from_icon_name(item.icon_name, Gtk.IconSize.DIALOG)
+            icon.set_pixel_size(28)
+            icon.get_style_context().add_class("result-icon")
+            layout.pack_start(icon, False, False, 0)
+            layout.pack_start(content, True, True, 0)
+            row.add(layout)
+        else:
+            row.add(content)
         row.connect("button-press-event", self._on_row_pressed, index)
         return row
 
@@ -398,6 +494,9 @@ class LauncherWindow(Gtk.Window):
         if not self._results:
             return
         item = self._results[self._selected_index]
+        if item.is_loading:
+            return
+        self._metrics.record("activate_result")
         item.action()
         self.get_application().hide_launcher()  # type: ignore[attr-defined]
 

@@ -2,6 +2,8 @@
   "background_color": "#282A36",
   "text_color": "#F8F8F2",
   "selected_item_background_color": "#FF79C6",
+  "answer_background_color": "#343746",
+  "answer_selected_background_color": "#44475A",
   "maximum_width": 775,
   "maximum_height": 600,
   "search_bar_height": 50,
@@ -20,7 +22,10 @@
   "default_search_engine": "google",
   "show_icons": true,
   "openai_enabled": false,
-  "openai_api_key": "",
   "openai_model": "gpt-4o",
-  "openai_web_search": true
+  "openai_web_search": true,
+  "clipboard_history_enabled": false,
+  "clipboard_history_limit": 50,
+  "extensions_enabled": true,
+  "usage_metrics_enabled": false
 }

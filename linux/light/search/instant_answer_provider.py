@@ -7,6 +7,7 @@ import re
 import urllib.parse
 import urllib.request
 import webbrowser
+from typing import Callable
 
 from ..configuration.configuration import Configuration
 from .openai_answer_provider import fetch_openai_answer, resolve_openai_api_key
@@ -124,27 +125,37 @@ def _fetch_wikipedia_answer(query: str) -> tuple[str, str, str] | None:
 def fetch_instant_answer(
     query: str,
     config: Configuration | None = None,
-) -> tuple[str, str, str] | None:
-    """Return (title, answer_text, source_url).
+    on_delta: Callable[[str], None] | None = None,
+) -> tuple[str, str, list[str]] | None:
+    """Return (title, answer_text, source_urls).
 
     Prefer OpenAI + web search when configured; fall back to Wikipedia.
     """
     if config is not None and config.openai_enabled and resolve_openai_api_key(config):
         try:
-            openai_result = fetch_openai_answer(query, config)
+            openai_result = fetch_openai_answer(query, config, on_delta=on_delta)
         except Exception as exc:
             print(f"OpenAI answer failed, falling back to Wikipedia: {exc}", flush=True)
             openai_result = None
         if openai_result:
-            return openai_result.title, openai_result.answer, openai_result.source_url
+            return openai_result.title, openai_result.answer, openai_result.source_urls
 
-    return _fetch_wikipedia_answer(query)
+    wikipedia_result = _fetch_wikipedia_answer(query)
+    if not wikipedia_result:
+        return None
+    title, answer, source_url = wikipedia_result
+    return title, answer, [source_url]
 
 
-def instant_answer_item(query: str, title: str, answer: str, source_url: str) -> SearchItem:
+def instant_answer_item(
+    query: str,
+    title: str,
+    answer: str,
+    source_urls: list[str],
+) -> SearchItem:
     def open_source() -> None:
-        if source_url:
-            webbrowser.open(source_url)
+        if source_urls:
+            webbrowser.open(source_urls[0])
         else:
             webbrowser.open(
                 "https://www.google.com/search?q=" + urllib.parse.quote(query)
@@ -155,6 +166,7 @@ def instant_answer_item(query: str, title: str, answer: str, source_url: str) ->
         subtitle=answer,
         answer_text=answer,
         is_instant_answer=True,
+        source_urls=source_urls,
         icon_name="dialog-information",
         action=open_source,
     )

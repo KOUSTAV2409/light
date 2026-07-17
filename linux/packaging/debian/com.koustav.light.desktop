@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Light
+GenericName=Application Launcher
+Comment=AI-first launcher for Linux
+Exec=light
+Icon=system-search
+Terminal=false
+Categories=Utility;System;
+Keywords=launcher;search;AI;files;applications;
+StartupNotify=false

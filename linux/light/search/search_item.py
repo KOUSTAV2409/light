@@ -18,6 +18,8 @@ class SearchItem:
     path: str = ""
     is_instant_answer: bool = False
     answer_text: str = ""
+    source_urls: list[str] = field(default_factory=list)
+    is_loading: bool = False
     id: UUID = field(default_factory=uuid4)
 
     def __post_init__(self) -> None:
