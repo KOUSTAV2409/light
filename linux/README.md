@@ -74,8 +74,50 @@ On first run, config is copied to:
 
 ```
 ~/.config/light/configuration.json
-~/.config/light/actions.json   # optional user actions
+~/.config/light/secrets.json      # recommended place for API keys
+~/.config/light/actions.json      # optional user actions
 ```
+
+## OpenAI answers (current / news questions)
+
+Light can answer questions like Google’s AI Overview using **OpenAI Responses API + `web_search`**.
+
+1. Create secrets file (recommended — do not commit this):
+
+```bash
+mkdir -p ~/.config/light
+cat > ~/.config/light/secrets.json <<'EOF'
+{
+  "openai_api_key": "sk-your-key-here"
+}
+EOF
+chmod 600 ~/.config/light/secrets.json
+```
+
+Or export once per shell:
+
+```bash
+export OPENAI_API_KEY="sk-your-key-here"
+```
+
+2. Enable OpenAI in config (`~/.config/light/configuration.json`):
+
+```json
+"openai_enabled": true,
+"openai_model": "gpt-4o",
+"openai_web_search": true
+```
+
+3. Restart Light:
+
+```bash
+./run.sh stop
+./run.sh
+```
+
+Then ask: `who is the ceo of whatsapp global`
+
+Flow: OpenAI web search → short answer under the bar → Wikipedia only if OpenAI is off/unavailable.
 
 ## Project layout (mirrors Snap)
 
@@ -96,6 +138,7 @@ On first run, config is copied to:
 - File search without `fd`/`find` is shallow and slow
 - No clipboard history or snippet expansion yet
 - Power actions may need polkit permissions
+- OpenAI web search uses your API quota (Responses API + web_search tool)
 
 ## Next steps
 

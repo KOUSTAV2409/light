@@ -41,7 +41,10 @@ def _search_with_fd(query: str, paths: list[Path], limit: int, fd_bin: str) -> l
         "--max-results", str(limit),
         *map(str, paths),
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=1.5)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=1.5)
+    except subprocess.TimeoutExpired:
+        return []
     if result.returncode not in (0, 1):
         return []
     return [line for line in result.stdout.splitlines() if line.strip()]

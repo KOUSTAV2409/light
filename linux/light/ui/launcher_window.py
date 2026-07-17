@@ -15,7 +15,7 @@ from ..search.search_item import SearchItem
 
 
 class LauncherWindow(Gtk.Window):
-    DEBOUNCE_MS = 120
+    DEBOUNCE_MS = 250
 
     def __init__(self, app: Gtk.Application, config: Configuration, engine: SearchEngine) -> None:
         super().__init__(application=app, title="Light", type=Gtk.WindowType.TOPLEVEL)
@@ -186,8 +186,8 @@ class LauncherWindow(Gtk.Window):
 
     def _run_debounced_search(self) -> bool:
         self._search_timeout_id = 0
-        query = self._pending_query
-        if not query.strip():
+        query = self._pending_query.strip()
+        if not query:
             return False
 
         self._search_generation += 1
@@ -197,16 +197,33 @@ class LauncherWindow(Gtk.Window):
         if generation != self._search_generation:
             return False
 
-        self._results = fast_results
+        self._results = list(fast_results)
         self._selected_index = 0
-        self._render_results()
 
         if self._engine.should_fetch_instant_answer(query):
+            loading = SearchItem(
+                title="Looking up answer…",
+                subtitle="Searching the web with OpenAI…"
+                if self._engine.uses_openai_answers
+                else "Fetching from Wikipedia",
+                is_instant_answer=True,
+                answer_text=(
+                    "Searching the web with OpenAI…"
+                    if self._engine.uses_openai_answers
+                    else "Fetching from Wikipedia…"
+                ),
+                icon_name="dialog-information",
+                action=lambda: None,
+            )
+            self._results = self._engine.merge_results(fast_results, [], loading)
+            self._render_results()
             threading.Thread(
                 target=self._fetch_instant_answer_background,
                 args=(generation, query),
                 daemon=True,
             ).start()
+        else:
+            self._render_results()
 
         if self._engine.should_search_files(query):
             threading.Thread(
@@ -218,18 +235,36 @@ class LauncherWindow(Gtk.Window):
         return False
 
     def _fetch_instant_answer_background(self, generation: int, query: str) -> None:
-        answer_item = self._engine.fetch_instant_answer_item(query)
-        GLib.idle_add(self._apply_instant_answer, generation, query, answer_item)
+        answer_item: SearchItem | None = None
+        try:
+            answer_item = self._engine.fetch_instant_answer_item(query)
+        except Exception as exc:
+            print(f"Instant answer failed: {exc}", file=__import__("sys").stderr, flush=True)
+
+        def apply() -> bool:
+            return self._apply_instant_answer(generation, query, answer_item)
+
+        GLib.idle_add(apply)
 
     def _fetch_files_background(self, generation: int, query: str) -> None:
-        file_results = self._engine.search_files_only(query)
-        GLib.idle_add(self._apply_file_results, generation, query, file_results)
+        try:
+            file_results = self._engine.search_files_only(query)
+        except Exception:
+            file_results = []
+
+        def apply() -> bool:
+            return self._apply_file_results(generation, query, file_results)
+
+        GLib.idle_add(apply)
 
     def _current_answer_item(self) -> SearchItem | None:
         for item in self._results:
-            if item.is_instant_answer:
+            if item.is_instant_answer and item.title != "Looking up answer…":
                 return item
         return None
+
+    def _same_query(self, query: str) -> bool:
+        return query.strip() == self._pending_query.strip()
 
     def _apply_instant_answer(
         self,
@@ -239,9 +274,7 @@ class LauncherWindow(Gtk.Window):
     ) -> bool:
         if generation != self._search_generation:
             return False
-        if query != self._pending_query:
-            return False
-        if answer_item is None:
+        if not self._same_query(query):
             return False
 
         fast_results = self._engine.search_fast(query)
@@ -259,7 +292,7 @@ class LauncherWindow(Gtk.Window):
     ) -> bool:
         if generation != self._search_generation:
             return False
-        if query != self._pending_query:
+        if not self._same_query(query):
             return False
 
         fast_results = self._engine.search_fast(query)

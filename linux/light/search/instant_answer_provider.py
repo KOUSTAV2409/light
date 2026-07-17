@@ -1,4 +1,4 @@
-"""Instant answer provider — fetches web snippets for factual queries."""
+"""Instant answer provider — OpenAI web search first, Wikipedia fallback."""
 
 from __future__ import annotations
 
@@ -8,6 +8,8 @@ import urllib.parse
 import urllib.request
 import webbrowser
 
+from ..configuration.configuration import Configuration
+from .openai_answer_provider import fetch_openai_answer, resolve_openai_api_key
 from .search_item import SearchItem
 
 _USER_AGENT = "LightLauncher/0.1 (Linux; MVP)"
@@ -24,30 +26,31 @@ def _fetch_url(url: str) -> str | None:
 
 
 def _rewrite_queries(query: str) -> list[str]:
-    """Turn natural questions into better Wikipedia search terms."""
     cleaned = query.strip()
     lowered = cleaned.lower()
     rewrites = [cleaned]
 
     patterns = [
-        (r"^ceo of (.+)$", r"\1 CEO"),
-        (r"^president of (.+)$", r"\1 president"),
-        (r"^capital of (.+)$", r"capital of \1"),
-        (r"^founder of (.+)$", r"\1 founder"),
         (r"^who is the ceo of (.+)$", r"\1 CEO"),
         (r"^who is ceo of (.+)$", r"\1 CEO"),
+        (r"^ceo of (.+)$", r"\1 CEO"),
+        (r"^who is the president of (.+)$", r"\1 president"),
+        (r"^president of (.+)$", r"\1 president"),
+        (r"^what is the capital of (.+)$", r"capital of \1"),
+        (r"^capital of (.+)$", r"capital of \1"),
+        (r"^who (?:founded|is the founder of) (.+)$", r"\1 founder"),
+        (r"^founder of (.+)$", r"\1 founder"),
         (r"^what is (.+)$", r"\1"),
+        (r"^who is (.+)$", r"\1"),
     ]
     for pattern, replacement in patterns:
-        match = re.match(pattern, lowered)
-        if match:
-            rewrites.insert(0, re.sub(pattern, replacement, lowered).strip())
+        if re.match(pattern, lowered):
+            rewritten = re.sub(pattern, replacement, lowered).strip()
+            if rewritten and rewritten not in rewrites:
+                rewrites.insert(0, rewritten)
+            break
 
-    unique: list[str] = []
-    for item in rewrites:
-        if item and item not in unique:
-            unique.append(item)
-    return unique
+    return rewrites
 
 
 def _score_extract(query: str, title: str, extract: str) -> int:
@@ -118,8 +121,23 @@ def _fetch_wikipedia_answer(query: str) -> tuple[str, str, str] | None:
     return best
 
 
-def fetch_instant_answer(query: str) -> tuple[str, str, str] | None:
-    """Return (title, answer_text, source_url) for a query."""
+def fetch_instant_answer(
+    query: str,
+    config: Configuration | None = None,
+) -> tuple[str, str, str] | None:
+    """Return (title, answer_text, source_url).
+
+    Prefer OpenAI + web search when configured; fall back to Wikipedia.
+    """
+    if config is not None and config.openai_enabled and resolve_openai_api_key(config):
+        try:
+            openai_result = fetch_openai_answer(query, config)
+        except Exception as exc:
+            print(f"OpenAI answer failed, falling back to Wikipedia: {exc}", flush=True)
+            openai_result = None
+        if openai_result:
+            return openai_result.title, openai_result.answer, openai_result.source_url
+
     return _fetch_wikipedia_answer(query)
 
 

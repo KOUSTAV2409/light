@@ -38,17 +38,25 @@ class SearchEngine:
         return results[: self._config.result_item_limit]
 
     def should_search_files(self, query: str) -> bool:
-        if len(query.strip()) < 2:
+        query = query.strip()
+        if len(query) < 3:
             return False
-        if looks_like_url(query.strip()):
+        if looks_like_url(query):
             return False
 
-        parts = query.split(maxsplit=1)
-        token = parts[0]
+        parts = query.split()
+        token = parts[0].lower()
 
-        action_results = self._action_search.search(query, parts[1] if len(parts) > 1 else "")
+        # Skip common English stopwords while the user is still typing a question.
+        if token in {
+            "who", "what", "when", "where", "why", "how", "is", "are",
+            "the", "a", "an", "of", "for", "to", "in", "on",
+        }:
+            return False
+
+        action_results = self._action_search.search(query, " ".join(parts[1:]) if len(parts) > 1 else "")
         exact_action = any(
-            token.lower() in {kw.lower() for kw in item.keywords}
+            token in {kw.lower() for kw in item.keywords}
             for item in action_results
         )
         if exact_action:
@@ -82,11 +90,17 @@ class SearchEngine:
         return True
 
     def fetch_instant_answer_item(self, query: str) -> SearchItem | None:
-        result = fetch_instant_answer(query)
+        result = fetch_instant_answer(query, self._config)
         if not result:
             return None
         title, answer, source_url = result
         return instant_answer_item(query, title, answer, source_url)
+
+    @property
+    def uses_openai_answers(self) -> bool:
+        from .openai_answer_provider import resolve_openai_api_key
+
+        return bool(self._config.openai_enabled and resolve_openai_api_key(self._config))
 
     def search_files_only(self, query: str) -> list[SearchItem]:
         return search_files(query, self._config)
