@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from fnmatch import fnmatch
 from pathlib import Path
+from threading import Event
 
 from ..configuration.configuration import Configuration
 from .search_item import SearchItem
@@ -98,22 +100,63 @@ def _search_tiers(config: Configuration) -> list[list[Path]]:
     return [slow] if slow else [[home]]
 
 
-def _run_subprocess(cmd: list[str], timeout: float) -> subprocess.CompletedProcess[str] | None:
-    try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
+def _run_subprocess(
+    cmd: list[str],
+    timeout: float,
+    cancel_event: Event | None = None,
+) -> subprocess.CompletedProcess[str] | None:
+    if cancel_event is None:
+        try:
+            return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+
+    if cancel_event.is_set():
         return None
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
     except OSError:
         return None
 
+    deadline = time.monotonic() + timeout
+    while True:
+        if cancel_event.is_set() or time.monotonic() >= deadline:
+            process.terminate()
+            try:
+                process.wait(timeout=0.2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            return None
+        try:
+            stdout, stderr = process.communicate(timeout=0.1)
+            return subprocess.CompletedProcess(
+                cmd,
+                process.returncode,
+                stdout,
+                stderr,
+            )
+        except subprocess.TimeoutExpired:
+            continue
 
-def _search_with_locate(tokens: list[str], limit: int) -> list[str]:
+
+def _search_with_locate(
+    tokens: list[str],
+    limit: int,
+    cancel_event: Event | None = None,
+) -> list[str]:
     locate_bin = _locate_binary()
     if not locate_bin or not tokens:
         return []
 
     cmd = [locate_bin, "-i", "-l", str(max(limit * 4, 40)), _primary_token(tokens)]
-    result = _run_subprocess(cmd, timeout=1.0)
+    result = _run_subprocess(cmd, timeout=1.0, cancel_event=cancel_event)
     if result is None or result.returncode not in (0, 1):
         return []
 
@@ -133,6 +176,7 @@ def _search_with_fd(
     limit: int,
     fd_bin: str,
     timeout: float,
+    cancel_event: Event | None = None,
 ) -> list[str]:
     tokens = _query_tokens(query)
     if not tokens or not paths:
@@ -152,7 +196,7 @@ def _search_with_fd(
         cmd.extend(["--exclude", exclude])
     cmd.extend(["--", pattern, *map(str, paths)])
 
-    result = _run_subprocess(cmd, timeout=timeout)
+    result = _run_subprocess(cmd, timeout=timeout, cancel_event=cancel_event)
     if result is None or result.returncode not in (0, 1):
         return []
 
@@ -164,7 +208,13 @@ def _search_with_fd(
     return matches[:limit]
 
 
-def _search_with_find(query: str, paths: list[Path], limit: int, timeout: float) -> list[str]:
+def _search_with_find(
+    query: str,
+    paths: list[Path],
+    limit: int,
+    timeout: float,
+    cancel_event: Event | None = None,
+) -> list[str]:
     tokens = _query_tokens(query)
     if not tokens:
         return []
@@ -172,6 +222,8 @@ def _search_with_find(query: str, paths: list[Path], limit: int, timeout: float)
     pattern = f"*{_primary_token(tokens)}*"
     found: list[str] = []
     for base in paths:
+        if cancel_event is not None and cancel_event.is_set():
+            return found
         if not base.exists():
             continue
         cmd = [
@@ -185,7 +237,7 @@ def _search_with_find(query: str, paths: list[Path], limit: int, timeout: float)
             "-path",
             "*/.*",
         ]
-        result = _run_subprocess(cmd, timeout=timeout)
+        result = _run_subprocess(cmd, timeout=timeout, cancel_event=cancel_event)
         if result is None or result.returncode != 0:
             continue
         for line in result.stdout.splitlines():
@@ -197,7 +249,12 @@ def _search_with_find(query: str, paths: list[Path], limit: int, timeout: float)
     return found[:limit]
 
 
-def _search_with_python(query: str, paths: list[Path], limit: int) -> list[str]:
+def _search_with_python(
+    query: str,
+    paths: list[Path],
+    limit: int,
+    cancel_event: Event | None = None,
+) -> list[str]:
     tokens = _query_tokens(query)
     if not tokens:
         return []
@@ -205,9 +262,13 @@ def _search_with_python(query: str, paths: list[Path], limit: int) -> list[str]:
     pattern = f"*{_primary_token(tokens)}*"
     found: list[str] = []
     for base in paths:
+        if cancel_event is not None and cancel_event.is_set():
+            return found
         if not base.exists():
             continue
         for root, dirs, files in os.walk(base):
+            if cancel_event is not None and cancel_event.is_set():
+                return found
             depth = root[len(str(base)) :].count(os.sep)
             if depth > 3:
                 dirs.clear()
@@ -222,7 +283,12 @@ def _search_with_python(query: str, paths: list[Path], limit: int) -> list[str]:
     return found
 
 
-def _collect_raw_paths(query: str, config: Configuration, limit: int) -> list[str]:
+def _collect_raw_paths(
+    query: str,
+    config: Configuration,
+    limit: int,
+    cancel_event: Event | None = None,
+) -> list[str]:
     tokens = _query_tokens(query)
     if not tokens:
         return []
@@ -241,31 +307,59 @@ def _collect_raw_paths(query: str, config: Configuration, limit: int) -> list[st
             if len(collected) >= limit:
                 return
 
-    add(_search_with_locate(tokens, limit))
+    add(_search_with_locate(tokens, limit, cancel_event=cancel_event))
 
     fd_bin = _fd_binary()
     tiers = _search_tiers(config)
     for index, tier in enumerate(tiers):
+        if cancel_event is not None and cancel_event.is_set():
+            break
         if len(collected) >= limit:
             break
         remaining = limit - len(collected)
         timeout = 2.0 if index == 0 else 5.0
         if fd_bin:
-            add(_search_with_fd(query, tier, remaining, fd_bin, timeout=timeout))
+            add(
+                _search_with_fd(
+                    query,
+                    tier,
+                    remaining,
+                    fd_bin,
+                    timeout=timeout,
+                    cancel_event=cancel_event,
+                )
+            )
         elif shutil.which("find"):
-            add(_search_with_find(query, tier, remaining, timeout=timeout))
+            add(
+                _search_with_find(
+                    query,
+                    tier,
+                    remaining,
+                    timeout=timeout,
+                    cancel_event=cancel_event,
+                )
+            )
         else:
-            add(_search_with_python(query, tier, remaining))
+            add(_search_with_python(query, tier, remaining, cancel_event=cancel_event))
 
     return collected[:limit]
 
 
-def search_files(query: str, config: Configuration) -> list[SearchItem]:
+def search_files(
+    query: str,
+    config: Configuration,
+    cancel_event: Event | None = None,
+) -> list[SearchItem]:
     if not query.strip():
         return []
 
     limit = config.result_item_limit
-    raw_paths = _collect_raw_paths(query, config, limit * 2)
+    raw_paths = _collect_raw_paths(
+        query,
+        config,
+        limit * 2,
+        cancel_event=cancel_event,
+    )
 
     items: list[SearchItem] = []
     for path in raw_paths[:limit]:

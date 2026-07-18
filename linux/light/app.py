@@ -21,8 +21,10 @@ from .clipboard.manager import ClipboardManager
 from .configuration.configuration import Configuration
 from .keyboard.hotkey import start_global_hotkey
 from .metrics import UsageMetrics
+from .platform.file_index import file_index_status
 from .search.search import SearchEngine
 from .ui.launcher_window import LauncherWindow
+from .ui.preferences_window import PreferencesWindow
 
 
 class LightApplication(Gtk.Application):
@@ -95,6 +97,11 @@ class LightApplication(Gtk.Application):
         if self._config.clipboard_history_enabled:
             self._clipboard_manager.start()
         self._metrics.record("launch")
+        index_status = file_index_status()
+        if not index_status.database_exists and index_status.backend != "none":
+            print(f"Note: {index_status.hint}", file=sys.stderr, flush=True)
+        elif index_status.backend == "none":
+            print(f"Tip: {index_status.hint}", file=sys.stderr, flush=True)
         self._started = True
 
     def _on_delete_event(self, *_args) -> bool:
@@ -123,6 +130,22 @@ class LightApplication(Gtk.Application):
         else:
             self.show_launcher()
 
+    def show_preferences(self) -> None:
+        if self._window is None:
+            return
+        dialog = PreferencesWindow(self._window, self._config)
+        response = dialog.run()
+        if response == Gtk.ResponseType.OK:
+            self._config = dialog.apply()
+            self._metrics = UsageMetrics(self._config.usage_metrics_enabled)
+            if self._window is not None:
+                self._window._metrics = self._metrics  # noqa: SLF001
+            if self._config.clipboard_history_enabled:
+                self._clipboard_manager.start()
+            else:
+                self._clipboard_manager.stop()
+        dialog.destroy()
+
     def _setup_tray(self) -> None:
         if AppIndicator is None:
             print(
@@ -140,9 +163,12 @@ class LightApplication(Gtk.Application):
         menu = Gtk.Menu()
         show_item = Gtk.MenuItem(label="Show Launcher")
         show_item.connect("activate", lambda *_: GLib.idle_add(self.show_launcher))
+        prefs_item = Gtk.MenuItem(label="Preferences…")
+        prefs_item.connect("activate", lambda *_: GLib.idle_add(self.show_preferences))
         quit_item = Gtk.MenuItem(label="Quit")
         quit_item.connect("activate", lambda *_: self.quit())
         menu.append(show_item)
+        menu.append(prefs_item)
         menu.append(quit_item)
         menu.show_all()
         indicator.set_menu(menu)

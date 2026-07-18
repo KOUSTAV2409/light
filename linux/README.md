@@ -173,6 +173,27 @@ Typing `ex hello` launches the command with `hello` as its final argument and
 in the `LIGHT_QUERY` environment variable. Commands are arrays and never run
 through a shell.
 
+## Preferences
+
+Open **Tray → Preferences** to configure:
+
+- OpenAI live answers and web search
+- Clipboard history
+- Privacy-safe local metrics
+- Search paths
+- File index status and refresh guidance
+
+## Optional fast file index
+
+Recommended for other users too, but not required:
+
+```bash
+sudo apt install plocate
+sudo updatedb
+```
+
+Light auto-detects `plocate`/`locate` and falls back to live `fdfind` search.
+
 ## Test
 
 ```bash
@@ -195,6 +216,8 @@ Privacy-safe local counters are disabled by default. Set
 `"usage_metrics_enabled": true`, then run `./run.sh metrics`. Queries, paths,
 clipboard contents, answers, and API keys are never recorded.
 
+See `VALIDATION.md` for the real-user validation workflow before paid features.
+
 ## Project layout (mirrors Snap)
 
 | Snap (macOS) | Light (Linux MVP) |
@@ -209,9 +232,11 @@ clipboard contents, answers, and API keys are never recorded.
 
 ## Known MVP limits
 
-- No Wayland layer-shell overlay yet (regular GTK window)
+- Wayland layer-shell is used automatically when `gir1.2-gtk-layer-shell-0.1`
+  is installed; otherwise Light falls back to a regular always-on-top GTK window
 - Automatic Wayland shortcut installation currently targets GNOME; other
   compositors use the command printed by `./run.sh install-hotkey`
-- File search without `fd`/`find` is shallow and slow
+- File search without `fd`/`find`/`plocate` is slower on large home folders
+- Flatpak build requires `flatpak-builder` and the GNOME 48 runtime locally
 - Power actions may need polkit permissions
 - OpenAI web search uses your API quota (Responses API + web_search tool)

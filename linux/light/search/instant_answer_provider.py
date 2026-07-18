@@ -7,10 +7,15 @@ import re
 import urllib.parse
 import urllib.request
 import webbrowser
+from threading import Event
 from typing import Callable
 
 from ..configuration.configuration import Configuration
-from .openai_answer_provider import fetch_openai_answer, resolve_openai_api_key
+from .openai_answer_provider import (
+    RequestCancelled,
+    fetch_openai_answer,
+    resolve_openai_api_key,
+)
 from .search_item import SearchItem
 
 _USER_AGENT = "LightLauncher/0.1 (Linux; MVP)"
@@ -126,21 +131,36 @@ def fetch_instant_answer(
     query: str,
     config: Configuration | None = None,
     on_delta: Callable[[str], None] | None = None,
+    cancel_event: Event | None = None,
 ) -> tuple[str, str, list[str]] | None:
     """Return (title, answer_text, source_urls).
 
     Prefer OpenAI + web search when configured; fall back to Wikipedia.
     """
+    if cancel_event is not None and cancel_event.is_set():
+        raise RequestCancelled()
+
     if config is not None and config.openai_enabled and resolve_openai_api_key(config):
         try:
-            openai_result = fetch_openai_answer(query, config, on_delta=on_delta)
+            openai_result = fetch_openai_answer(
+                query,
+                config,
+                on_delta=on_delta,
+                cancel_event=cancel_event,
+            )
+        except RequestCancelled:
+            raise
         except Exception as exc:
             print(f"OpenAI answer failed, falling back to Wikipedia: {exc}", flush=True)
             openai_result = None
         if openai_result:
             return openai_result.title, openai_result.answer, openai_result.source_urls
 
+    if cancel_event is not None and cancel_event.is_set():
+        raise RequestCancelled()
     wikipedia_result = _fetch_wikipedia_answer(query)
+    if cancel_event is not None and cancel_event.is_set():
+        raise RequestCancelled()
     if not wikipedia_result:
         return None
     title, answer, source_url = wikipedia_result

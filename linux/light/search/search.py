@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from threading import Event
 from typing import Callable
 
 from ..clipboard.history import ClipboardHistory
@@ -13,6 +14,7 @@ from .calculator_provider import maybe_calculator_item
 from .clipboard_provider import ClipboardSearch
 from .file_provider import search_files
 from .instant_answer_provider import fetch_instant_answer, instant_answer_item
+from .ranking import merge_ranked_results
 from .search_item import SearchItem
 from .web_provider import looks_like_url, search_web
 
@@ -186,11 +188,17 @@ class SearchEngine:
         self,
         query: str,
         on_delta: Callable[[str], None] | None = None,
+        cancel_event: Event | None = None,
     ) -> SearchItem | None:
         cleaned = query.strip()
         if cleaned.startswith("?"):
             cleaned = cleaned.lstrip("?").strip()
-        result = fetch_instant_answer(cleaned, self._config, on_delta=on_delta)
+        result = fetch_instant_answer(
+            cleaned,
+            self._config,
+            on_delta=on_delta,
+            cancel_event=cancel_event,
+        )
         if not result:
             return None
         title, answer, source_urls = result
@@ -202,8 +210,12 @@ class SearchEngine:
 
         return bool(self._config.openai_enabled and resolve_openai_api_key(self._config))
 
-    def search_files_only(self, query: str) -> list[SearchItem]:
-        return search_files(query, self._config)
+    def search_files_only(
+        self,
+        query: str,
+        cancel_event: Event | None = None,
+    ) -> list[SearchItem]:
+        return search_files(query, self._config, cancel_event=cancel_event)
 
     def search(self, query: str) -> list[SearchItem]:
         """Full search — used by tests; UI should prefer search_fast + search_files_only."""
@@ -217,13 +229,12 @@ class SearchEngine:
         fast: list[SearchItem],
         files: list[SearchItem],
         answer: SearchItem | None = None,
+        query: str = "",
     ) -> list[SearchItem]:
-        web_items = [item for item in fast if item.icon_name in ("web-browser", "system-search")]
-        head = [item for item in fast if item not in web_items]
-        merged: list[SearchItem] = []
-        if answer:
-            merged.append(answer)
-        merged.extend(head)
-        merged.extend(files)
-        merged.extend(web_items)
-        return merged[: self._config.result_item_limit]
+        return merge_ranked_results(
+            fast,
+            files,
+            answer,
+            query,
+            self._config.result_item_limit,
+        )

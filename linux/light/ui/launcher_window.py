@@ -12,9 +12,11 @@ from gi.repository import Gdk, GLib, Gtk, Pango
 
 from ..configuration.configuration import Configuration
 from ..metrics import UsageMetrics
-from ..search.search import SearchEngine
 from ..search.file_provider import file_search_loading_item
+from ..search.openai_answer_provider import RequestCancelled
+from ..search.search import SearchEngine
 from ..search.search_item import SearchItem
+from .layer_shell import center_on_screen as layer_center_on_screen, configure_launcher_window
 
 
 class LauncherWindow(Gtk.Window):
@@ -37,11 +39,12 @@ class LauncherWindow(Gtk.Window):
         self._search_generation = 0
         self._search_timeout_id = 0
         self._pending_query = ""
+        self._active_cancel_event: threading.Event | None = None
 
         self.set_decorated(False)
         self.set_resizable(False)
         self.set_default_size(config.maximum_width, config.search_bar_height)
-        self.set_keep_above(True)
+        self._window_mode = configure_launcher_window(self)
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
 
@@ -137,17 +140,7 @@ class LauncherWindow(Gtk.Window):
 
     def center_on_screen(self) -> None:
         self._resize_window()
-        display = Gdk.Display.get_default()
-        if display is None:
-            return
-        monitor = display.get_primary_monitor()
-        if monitor is None:
-            return
-        geometry = monitor.get_geometry()
-        width, height = self.get_size()
-        x = geometry.x + max(0, (geometry.width - width) // 2)
-        y = geometry.y + max(0, (geometry.height - height) // 4)
-        self.move(x, y)
+        layer_center_on_screen(self, self._config.maximum_width)
 
     def _window_height(self) -> int:
         if not self._results:
@@ -177,15 +170,29 @@ class LauncherWindow(Gtk.Window):
         self._entry.select_region(0, -1)
 
     def reset(self) -> None:
+        self._cancel_active_search()
         self._entry.set_text("")
         self._clear_results()
+
+    def _cancel_active_search(self) -> None:
+        if self._active_cancel_event is not None:
+            self._active_cancel_event.set()
+            self._active_cancel_event = None
+
+    def _cancel_debounce(self) -> None:
+        source_id = self._search_timeout_id
+        self._search_timeout_id = 0
+        if not source_id:
+            return
+        context = GLib.MainContext.default()
+        if context.find_source_by_id(source_id) is not None:
+            GLib.source_remove(source_id)
 
     def _on_text_changed(self, entry: Gtk.Entry) -> None:
         query = entry.get_text()
         self._pending_query = query
-
-        if self._search_timeout_id:
-            GLib.source_remove(self._search_timeout_id)
+        self._cancel_debounce()
+        self._cancel_active_search()
 
         if not query.strip():
             self._search_generation += 1
@@ -206,6 +213,8 @@ class LauncherWindow(Gtk.Window):
         self._metrics.record("search")
         self._search_generation += 1
         generation = self._search_generation
+        cancel_event = threading.Event()
+        self._active_cancel_event = cancel_event
 
         fast_results = self._engine.search_fast(query)
         if generation != self._search_generation:
@@ -234,37 +243,48 @@ class LauncherWindow(Gtk.Window):
         if self._engine.should_search_files(query):
             file_items = [file_search_loading_item()]
 
-        self._results = self._engine.merge_results(fast_results, file_items, answer_item)
+        self._results = self._engine.merge_results(
+            fast_results, file_items, answer_item, query
+        )
         self._selected_index = 0
         self._render_results()
 
         if answer_item is not None:
             threading.Thread(
                 target=self._fetch_instant_answer_background,
-                args=(generation, query),
+                args=(generation, query, cancel_event),
                 daemon=True,
             ).start()
 
         if file_items:
             threading.Thread(
                 target=self._fetch_files_background,
-                args=(generation, query),
+                args=(generation, query, cancel_event),
                 daemon=True,
             ).start()
 
         return False
 
-    def _fetch_instant_answer_background(self, generation: int, query: str) -> None:
+    def _fetch_instant_answer_background(
+        self,
+        generation: int,
+        query: str,
+        cancel_event: threading.Event,
+    ) -> None:
         answer_item: SearchItem | None = None
 
         def on_delta(text: str) -> None:
-            GLib.idle_add(self._apply_stream_delta, generation, query, text)
+            if not cancel_event.is_set():
+                GLib.idle_add(self._apply_stream_delta, generation, query, text)
 
         try:
             answer_item = self._engine.fetch_instant_answer_item(
                 query,
                 on_delta=on_delta if self._engine.uses_openai_answers else None,
+                cancel_event=cancel_event,
             )
+        except RequestCancelled:
+            return
         except Exception as exc:
             print(f"Instant answer failed: {exc}", file=__import__("sys").stderr, flush=True)
 
@@ -296,16 +316,27 @@ class LauncherWindow(Gtk.Window):
             fast_results,
             file_items,
             streaming_item,
+            query,
         )
         self._selected_index = 0
         self._render_results()
         return False
 
-    def _fetch_files_background(self, generation: int, query: str) -> None:
+    def _fetch_files_background(
+        self,
+        generation: int,
+        query: str,
+        cancel_event: threading.Event,
+    ) -> None:
         try:
-            file_results = self._engine.search_files_only(query)
+            file_results = self._engine.search_files_only(
+                query,
+                cancel_event=cancel_event,
+            )
         except Exception:
             file_results = []
+        if cancel_event.is_set():
+            return
 
         def apply() -> bool:
             return self._apply_file_results(generation, query, file_results)
@@ -354,7 +385,9 @@ class LauncherWindow(Gtk.Window):
                 and (existing.answer_text or existing.subtitle)
             ):
                 answer_item = existing
-        self._results = self._engine.merge_results(fast_results, file_items, answer_item)
+        self._results = self._engine.merge_results(
+            fast_results, file_items, answer_item, query
+        )
         self._selected_index = 0
         self._render_results()
         return False
@@ -373,7 +406,9 @@ class LauncherWindow(Gtk.Window):
         fast_results = self._engine.search_fast(query)
         # Preserve in-progress or completed AI row — do not drop "Looking up answer…".
         answer_item = self._current_answer_item()
-        self._results = self._engine.merge_results(fast_results, file_results, answer_item)
+        self._results = self._engine.merge_results(
+            fast_results, file_results, answer_item, query
+        )
         self._selected_index = min(self._selected_index, max(0, len(self._results) - 1))
         self._render_results()
         return False

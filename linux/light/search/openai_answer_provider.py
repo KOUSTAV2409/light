@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from threading import Event
 from typing import Callable
 
 from ..configuration.configuration import Configuration
@@ -29,6 +30,10 @@ class OpenAIAnswer:
     title: str
     answer: str
     source_urls: list[str]
+
+
+class RequestCancelled(Exception):
+    """Raised when a superseded answer request should stop quietly."""
 
 
 def resolve_openai_api_key(config: Configuration) -> str:
@@ -120,6 +125,7 @@ def _title_from_answer(query: str, answer: str) -> str:
 def _read_stream(
     response,
     on_delta: Callable[[str], None],
+    cancel_event: Event | None = None,
 ) -> dict:
     accumulated = ""
     last_emitted_length = 0
@@ -127,6 +133,8 @@ def _read_stream(
     source_urls: list[str] = []
 
     for raw_line in response:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RequestCancelled()
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
             continue
@@ -147,6 +155,8 @@ def _read_stream(
             ):
                 on_delta(accumulated)
                 last_emitted_length = len(accumulated)
+                if cancel_event is not None and cancel_event.is_set():
+                    raise RequestCancelled()
         elif event_type == "response.output_text.annotation.added":
             annotation = event.get("annotation") or {}
             url = annotation.get("url") if isinstance(annotation, dict) else None
@@ -158,6 +168,8 @@ def _read_stream(
             error = event.get("error") or event
             raise RuntimeError(f"OpenAI stream failed: {error}")
 
+    if cancel_event is not None and cancel_event.is_set():
+        raise RequestCancelled()
     if accumulated and len(accumulated) != last_emitted_length:
         on_delta(accumulated)
 
@@ -172,7 +184,10 @@ def fetch_openai_answer(
     query: str,
     config: Configuration,
     on_delta: Callable[[str], None] | None = None,
+    cancel_event: Event | None = None,
 ) -> OpenAIAnswer | None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise RequestCancelled()
     api_key = resolve_openai_api_key(config)
     if not api_key or not config.openai_enabled:
         return None
@@ -216,9 +231,13 @@ def fetch_openai_answer(
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
             if on_delta is not None:
-                payload = _read_stream(response, on_delta)
+                payload = _read_stream(response, on_delta, cancel_event)
             else:
                 payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        if cancel_event is not None and cancel_event.is_set():
+            raise RequestCancelled()
+    except RequestCancelled:
+        raise
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"OpenAI HTTP {exc.code}: {detail[:300]}") from exc
