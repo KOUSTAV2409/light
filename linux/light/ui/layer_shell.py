@@ -44,7 +44,12 @@ def configure_launcher_window(window: Gtk.Window) -> str:
     return "layer-shell"
 
 
-def center_on_screen(window: Gtk.Window, width: int) -> None:
+def center_on_screen(window: Gtk.Window, width: int, top_ratio: float = 0.22) -> None:
+    """Place the launcher with its top (search bar) at a fixed screen fraction.
+
+    Results grow downward. Do not re-center using the full window height — that
+    pulls the search bar upward as the result list expands.
+    """
     display = Gdk.Display.get_default()
     if display is None:
         return
@@ -52,9 +57,8 @@ def center_on_screen(window: Gtk.Window, width: int) -> None:
     if monitor is None:
         return
     geometry = monitor.get_geometry()
-    _, height = window.get_size()
     x = geometry.x + max(0, (geometry.width - width) // 2)
-    y = geometry.y + max(0, (geometry.height - height) // 4)
+    y = geometry.y + max(48, int(geometry.height * top_ratio))
     window.move(x, y)
     if _LAYER_SHELL_AVAILABLE and is_wayland() and GtkLayerShell is not None:
         GtkLayerShell.set_margin(window, GtkLayerShell.Edge.TOP, y - geometry.y)

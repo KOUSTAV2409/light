@@ -192,6 +192,9 @@ class LauncherWindow(Gtk.Window):
         self.set_size_request(-1, -1)
         self.resize(width, height)
         self.set_size_request(width, height)
+        # Keep search bar pinned; only grow/shrink results downward.
+        if self.get_visible():
+            layer_center_on_screen(self, width + 16)
 
     def focus_search(self) -> None:
         self._entry.grab_focus()
