@@ -1,4 +1,4 @@
-"""Raycast-style currency conversion using Frankfurter (no API key)."""
+"""Raycast-style currency conversion with market rates."""
 
 from __future__ import annotations
 
@@ -14,9 +14,21 @@ from .openai_answer_provider import RequestCancelled
 from .search_item import SearchItem
 
 _TIMEOUT = 4
-_API = "https://api.frankfurter.dev/v1/latest"
 
-# Common aliases → ISO codes Frankfurter understands.
+# Prefer frequently updated market rates closest to Google/Morningstar-style mid rates.
+_MARKET_URLS = (
+    "https://open.er-api.com/v6/latest/{BASE}",
+    "https://latest.currency-api.pages.dev/v1/currencies/{base}.json",
+    "https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{base}.json",
+)
+_ECB_URL = "https://api.frankfurter.dev/v1/latest?base={BASE}&symbols={QUOTE}"
+_SOURCE_LABELS = {
+    "open.er-api.com": "ExchangeRate-API",
+    "currency-api.pages.dev": "market rates",
+    "jsdelivr.net": "market rates",
+    "frankfurter.dev": "ECB via Frankfurter",
+}
+
 _CURRENCY_ALIASES: dict[str, str] = {
     "usd": "USD",
     "dollar": "USD",
@@ -95,6 +107,13 @@ class CurrencyQuery:
     to_code: str
 
 
+@dataclass(frozen=True)
+class CurrencyRate:
+    rate: float
+    date: str
+    source: str
+
+
 def _normalize_currency(token: str) -> str | None:
     cleaned = token.strip().lower().replace(".", "").replace(" ", "")
     if not cleaned:
@@ -145,15 +164,7 @@ def _format_amount(value: float) -> str:
     return text
 
 
-def convert_currency(
-    query: CurrencyQuery,
-    cancel_event: Event | None = None,
-) -> tuple[str, str, str] | None:
-    """Return (title, answer_text, copy_value)."""
-    if cancel_event is not None and cancel_event.is_set():
-        raise RequestCancelled()
-
-    url = f"{_API}?base={query.from_code}&symbols={query.to_code}"
+def _fetch_json(url: str) -> dict | None:
     request = urllib.request.Request(
         url,
         headers={"User-Agent": "LightLauncher/0.1", "Accept": "application/json"},
@@ -161,30 +172,114 @@ def convert_currency(
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT) as response:
             payload = json.loads(response.read().decode("utf-8", errors="replace"))
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, json.JSONDecodeError, OSError):
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        TimeoutError,
+        json.JSONDecodeError,
+        OSError,
+    ):
         return None
+    return payload if isinstance(payload, dict) else None
 
+
+def _rate_from_payload(
+    payload: dict,
+    from_code: str,
+    to_code: str,
+    source: str,
+) -> CurrencyRate | None:
+    base = from_code.lower()
+    quote = to_code.lower()
+
+    # fawazahmed0: {"date":"...","usd":{"inr":96.5,...}}
+    nested = payload.get(base)
+    if isinstance(nested, dict):
+        value = nested.get(quote)
+        if isinstance(value, (int, float)):
+            return CurrencyRate(
+                rate=float(value),
+                date=str(payload.get("date", "")).strip(),
+                source=source,
+            )
+
+    # open.er-api / frankfurter: {"rates":{"INR":96.5}, "date"/"time_last_update_utc"}
+    rates = payload.get("rates")
+    if isinstance(rates, dict):
+        value = rates.get(to_code) or rates.get(quote)
+        if isinstance(value, (int, float)):
+            date = (
+                str(payload.get("date", "")).strip()
+                or str(payload.get("time_last_update_utc", "")).strip()[:16]
+            )
+            return CurrencyRate(rate=float(value), date=date, source=source)
+    return None
+
+
+def fetch_market_rate(
+    query: CurrencyQuery,
+    cancel_event: Event | None = None,
+) -> CurrencyRate | None:
     if cancel_event is not None and cancel_event.is_set():
         raise RequestCancelled()
 
-    rates = payload.get("rates") if isinstance(payload, dict) else None
-    if not isinstance(rates, dict):
-        return None
-    rate = rates.get(query.to_code)
-    if not isinstance(rate, (int, float)):
+    base_lower = query.from_code.lower()
+    candidates = [
+        (
+            _MARKET_URLS[0].format(BASE=query.from_code),
+            "ExchangeRate-API",
+        ),
+        (
+            _MARKET_URLS[1].format(base=base_lower),
+            "market rates",
+        ),
+        (
+            _MARKET_URLS[2].format(base=base_lower),
+            "market rates",
+        ),
+        (
+            _ECB_URL.format(BASE=query.from_code, QUOTE=query.to_code),
+            "ECB via Frankfurter",
+        ),
+    ]
+
+    for url, source in candidates:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RequestCancelled()
+        payload = _fetch_json(url)
+        if not payload:
+            continue
+        rate = _rate_from_payload(payload, query.from_code, query.to_code, source)
+        if rate is not None:
+            return rate
+    return None
+
+
+def convert_currency(
+    query: CurrencyQuery,
+    cancel_event: Event | None = None,
+) -> tuple[str, str, str] | None:
+    """Return (title, answer_text, copy_value)."""
+    rate_info = fetch_market_rate(query, cancel_event=cancel_event)
+    if rate_info is None:
         return None
 
-    converted = float(rate) * query.amount
+    converted = rate_info.rate * query.amount
     amount_text = _format_amount(query.amount)
     result_text = _format_amount(converted)
-    rate_text = _format_amount(float(rate))
-    date = str(payload.get("date", "")).strip()
+    rate_text = _format_amount(rate_info.rate)
 
     title = f"{amount_text} {query.from_code} = {result_text} {query.to_code}"
+    details = [
+        f"1 {query.from_code} = {rate_text} {query.to_code}",
+        rate_info.source,
+    ]
+    if rate_info.date:
+        details.append(f"as of {rate_info.date}")
     answer = (
-        f"1 {query.from_code} = {rate_text} {query.to_code}"
-        + (f" · rates as of {date}" if date else "")
-        + ". Press Enter to copy the converted amount."
+        " · ".join(details)
+        + ". Approximate mid-market rate; Google may differ slightly. "
+        "Press Enter to copy."
     )
     return title, answer, result_text
 

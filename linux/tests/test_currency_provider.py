@@ -45,20 +45,18 @@ class CurrencyProviderTests(unittest.TestCase):
         query = parse_currency_query("10 usd to inr")
         assert query is not None
         with patch(
-            "light.search.currency_provider.urllib.request.urlopen"
-        ) as urlopen:
-            response = urlopen.return_value.__enter__.return_value
-            response.read.return_value = (
-                b'{"date":"2026-07-17","rates":{"INR":83.5}}'
-            )
+            "light.search.currency_provider._fetch_json",
+            return_value={"date": "2026-07-18", "usd": {"inr": 96.53}},
+        ):
             result = convert_currency(query)
         self.assertIsNotNone(result)
         assert result is not None
         title, answer, copy_value = result
-        self.assertIn("835", title)
+        self.assertIn("965.3", title)
         self.assertIn("INR", title)
-        self.assertEqual(copy_value, "835.00")
-        self.assertIn("2026-07-17", answer)
+        self.assertEqual(copy_value, "965.30")
+        self.assertIn("ExchangeRate-API", answer)
+        self.assertIn("2026-07-18", answer)
 
 
 if __name__ == "__main__":
