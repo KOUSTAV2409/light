@@ -139,6 +139,7 @@ class LightApplication(Gtk.Application):
             self._config = dialog.apply()
             self._metrics = UsageMetrics(self._config.usage_metrics_enabled)
             if self._window is not None:
+                self._window.apply_config(self._config)
                 self._window._metrics = self._metrics  # noqa: SLF001
             if self._config.clipboard_history_enabled:
                 self._clipboard_manager.start()

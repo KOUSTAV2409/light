@@ -26,21 +26,23 @@ BUNDLED_DEFAULT = Path(__file__).with_name("default_configuration.json")
 
 @dataclass
 class Configuration:
-    background_color: str = "#282A36"
-    text_color: str = "#F8F8F2"
-    selected_item_background_color: str = "#FF79C6"
-    answer_background_color: str = "#343746"
-    answer_selected_background_color: str = "#44475A"
-    maximum_width: int = 775
-    maximum_height: int = 600
-    search_bar_height: int = 50
-    result_item_height: int = 48
+    theme: str = "raycast"
+    background_color: str = "#1C1C1E"
+    text_color: str = "#F5F5F7"
+    selected_item_background_color: str = "#FF6363"
+    answer_background_color: str = "#252528"
+    answer_selected_background_color: str = "#3A3A3C"
+    maximum_width: int = 680
+    maximum_height: int = 560
+    search_bar_height: int = 58
+    result_item_height: int = 52
     result_item_limit: int = 25
     search_paths: list[str] = field(default_factory=lambda: ["~"])
     blocked_paths: list[str] = field(default_factory=list)
     activation_hotkey: str = "alt+space"
     default_search_engine: str = "google"
     show_icons: bool = True
+    show_keyboard_hints: bool = True
 
     # OpenAI instant answers (web-grounded)
     openai_enabled: bool = False

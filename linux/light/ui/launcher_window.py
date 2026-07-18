@@ -17,6 +17,22 @@ from ..search.openai_answer_provider import RequestCancelled
 from ..search.search import SearchEngine
 from ..search.search_item import SearchItem
 from .layer_shell import center_on_screen as layer_center_on_screen, configure_launcher_window
+from .theme import build_launcher_css, resolve_theme
+
+
+def _title_duplicates_answer(title: str, answer: str) -> bool:
+    """True when title is just the start of the answer (causes ghosted text)."""
+    if not title or not answer:
+        return False
+    norm_title = title.rstrip(".…").strip().casefold()
+    norm_answer = answer.strip().casefold()
+    if not norm_title:
+        return False
+    if norm_answer.startswith(norm_title):
+        return True
+    # First sentence of answer used as title
+    first = norm_answer.split(".", 1)[0].strip()
+    return bool(first) and (norm_title == first or first.startswith(norm_title))
 
 
 class LauncherWindow(Gtk.Window):
@@ -33,6 +49,7 @@ class LauncherWindow(Gtk.Window):
         self._config = config
         self._engine = engine
         self._metrics = metrics or UsageMetrics(enabled=False)
+        self._theme = resolve_theme(config.theme)
         self._results: list[SearchItem] = []
         self._result_rows: list[Gtk.EventBox] = []
         self._selected_index = 0
@@ -40,84 +57,39 @@ class LauncherWindow(Gtk.Window):
         self._search_timeout_id = 0
         self._pending_query = ""
         self._active_cancel_event: threading.Event | None = None
+        self._css_provider = Gtk.CssProvider()
 
         self.set_decorated(False)
         self.set_resizable(False)
-        self.set_default_size(config.maximum_width, config.search_bar_height)
+        self.set_default_size(self._theme.width, self._theme.search_height)
         self._window_mode = configure_launcher_window(self)
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
+        self.get_style_context().add_class("light-launcher")
+        self._enable_rgba()
+        self._apply_theme_css()
 
-        css = f"""
-        window {{
-            background-color: {config.background_color};
-        }}
-        .search-shell {{
-            background-color: {config.background_color};
-        }}
-        entry {{
-            background-color: {config.background_color};
-            color: {config.text_color};
-            border: none;
-            padding: 12px 16px;
-            font-size: 18px;
-        }}
-        .results-panel {{
-            background-color: {config.background_color};
-        }}
-        .results-separator {{
-            background-color: rgba(248, 248, 242, 0.15);
-            min-height: 1px;
-        }}
-        .result-row {{
-            background-color: {config.background_color};
-            padding: 8px 12px;
-        }}
-        .result-row.selected {{
-            background-color: {config.selected_item_background_color};
-        }}
-        .answer-row {{
-            background-color: {config.answer_background_color};
-            padding: 12px 14px;
-        }}
-        .answer-row.selected {{
-            background-color: {config.answer_selected_background_color};
-        }}
-        .answer-body {{
-            font-size: 14px;
-            color: {config.text_color};
-        }}
-        .answer-source {{
-            font-size: 11px;
-            color: {config.text_color};
-            opacity: 0.6;
-        }}
-        .result-title {{
-            font-size: 15px;
-            font-weight: 600;
-            color: {config.text_color};
-        }}
-        .result-subtitle {{
-            font-size: 12px;
-            color: {config.text_color};
-            opacity: 0.75;
-        }}
-        .result-icon {{
-            margin-right: 10px;
-        }}
-        """
-        provider = Gtk.CssProvider()
-        provider.load_from_data(css.encode())
-        Gtk.StyleContext.add_provider_for_screen(
-            Gdk.Screen.get_default(),
-            provider,
-            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
-        )
+        # Floating card frame
+        self._frame = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        self._frame.get_style_context().add_class("launcher-frame")
+
+        # Search header with icon + entry
+        self._header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        self._header.get_style_context().add_class("search-header")
+        self._header.get_style_context().add_class("collapsed")
+
+        search_icon = Gtk.Image.new_from_icon_name("system-search-symbolic", Gtk.IconSize.LARGE_TOOLBAR)
+        search_icon.set_pixel_size(20)
+        search_icon.get_style_context().add_class("search-icon")
+        self._header.pack_start(search_icon, False, False, 0)
 
         self._entry = Gtk.Entry()
-        self._entry.set_placeholder_text("Search files, apps, and commands…")
+        self._entry.get_style_context().add_class("search-entry")
+        self._entry.set_placeholder_text("Search apps, files, commands, or ask…")
+        self._entry.set_has_frame(False)
         self._entry.connect("changed", self._on_text_changed)
         self._entry.connect("activate", self._on_activate)
+        self._header.pack_start(self._entry, True, True, 0)
 
         self._results_panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         self._results_panel.get_style_context().add_class("results-panel")
@@ -127,43 +99,99 @@ class LauncherWindow(Gtk.Window):
         separator.get_style_context().add_class("results-separator")
         self._results_panel.pack_start(separator, False, False, 0)
 
+        scrolled = Gtk.ScrolledWindow()
+        scrolled.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scrolled.set_shadow_type(Gtk.ShadowType.NONE)
+        scrolled.set_propagate_natural_height(True)
         self._results_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        self._results_panel.pack_start(self._results_box, False, False, 0)
+        scrolled.add(self._results_box)
+        self._results_panel.pack_start(scrolled, False, False, 0)
 
-        shell = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        shell.get_style_context().add_class("search-shell")
-        shell.pack_start(self._entry, False, False, 0)
-        shell.pack_start(self._results_panel, False, False, 0)
-        self.add(shell)
+        self._footer = Gtk.Label(
+            label="↑↓ navigate   ⏎ open   esc hide",
+            xalign=0,
+        )
+        self._footer.get_style_context().add_class("footer-hint")
+        if config.show_keyboard_hints:
+            self._results_panel.pack_start(self._footer, False, False, 0)
+
+        self._frame.pack_start(self._header, False, False, 0)
+        self._frame.pack_start(self._results_panel, False, False, 0)
+
+        # Outer transparent padding so the rounded card can cast a visual gap
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        outer.set_margin_top(8)
+        outer.set_margin_bottom(8)
+        outer.set_margin_start(8)
+        outer.set_margin_end(8)
+        outer.pack_start(self._frame, True, True, 0)
+        self.add(outer)
 
         self.connect("key-press-event", self._on_key_pressed)
 
+    def _enable_rgba(self) -> None:
+        screen = self.get_screen()
+        visual = screen.get_rgba_visual()
+        if visual is not None and screen.is_composited():
+            self.set_visual(visual)
+        self.set_app_paintable(True)
+
+    def _apply_theme_css(self) -> None:
+        css = build_launcher_css(self._theme)
+        self._css_provider.load_from_data(css.encode())
+        Gtk.StyleContext.add_provider_for_screen(
+            Gdk.Screen.get_default(),
+            self._css_provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
+
+    def apply_config(self, config: Configuration) -> None:
+        """Refresh theme/layout tokens after Preferences save."""
+        self._config = config
+        self._theme = resolve_theme(config.theme)
+        self._apply_theme_css()
+        self.set_default_size(self._theme.width, self._theme.search_height)
+        if config.show_keyboard_hints:
+            self._footer.show()
+        else:
+            self._footer.hide()
+        self._resize_window()
+        self._render_results()
+
     def center_on_screen(self) -> None:
         self._resize_window()
-        layer_center_on_screen(self, self._config.maximum_width)
+        layer_center_on_screen(self, self._theme.width + 16)
 
     def _window_height(self) -> int:
+        chrome = 16  # outer margins
+        search_h = self._theme.search_height
         if not self._results:
-            return self._config.search_bar_height
-        results_height = sum(self._row_height(item) for item in self._results)
-        results_height = min(
-            self._config.maximum_height - self._config.search_bar_height,
-            results_height,
+            return search_h + chrome
+        results_height = sum(self._row_height(item) for item in self._results[:12])
+        footer = 26 if self._config.show_keyboard_hints else 0
+        separator = 8
+        panel = min(
+            self._config.maximum_height - search_h,
+            results_height + footer + separator,
         )
-        return self._config.search_bar_height + results_height
+        return search_h + panel + chrome
 
     def _row_height(self, item: SearchItem) -> int:
         if item.is_instant_answer:
-            text = item.answer_text or item.subtitle
-            lines = min(5, max(2, len(text) // 75 + 1))
-            return self._config.result_item_height + (lines - 1) * 22
-        return self._config.result_item_height
+            text = (item.answer_text or item.subtitle or "").strip()
+            # Title is only a short label now; size mainly from wrapped body.
+            approx_chars = max(1, self._theme.width // 9)
+            lines = min(5, max(1, (len(text) + approx_chars - 1) // approx_chars))
+            return 52 + lines * 17
+        return self._theme.result_height
 
     def _resize_window(self) -> None:
-        width = self._config.maximum_width
+        width = self._theme.width
         height = self._window_height()
-        self.set_size_request(width, height)
+        # Clear prior minimum so shrinking after fewer results works.
+        self.set_size_request(-1, -1)
         self.resize(width, height)
+        self.set_size_request(width, height)
 
     def focus_search(self) -> None:
         self._entry.grab_focus()
@@ -420,6 +448,7 @@ class LauncherWindow(Gtk.Window):
     def _clear_result_rows(self) -> None:
         for row in self._result_rows:
             self._results_box.remove(row)
+            row.destroy()
         self._result_rows = []
 
     def _clear_results(self) -> None:
@@ -427,71 +456,95 @@ class LauncherWindow(Gtk.Window):
         self._selected_index = 0
         self._clear_result_rows()
         self._results_panel.hide()
+        self._header.get_style_context().add_class("collapsed")
         self._resize_window()
 
     def _build_result_row(self, index: int, item: SearchItem) -> Gtk.EventBox:
         row = Gtk.EventBox()
         row.set_visible_window(True)
-        row.set_size_request(-1, self._row_height(item))
-
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        content.set_margin_top(4)
-        content.set_margin_bottom(4)
 
         if item.is_instant_answer:
             row.get_style_context().add_class("answer-row")
+            content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            content.get_style_context().add_class("answer-inner")
 
-            title = Gtk.Label(label=item.title, xalign=0)
-            title.get_style_context().add_class("result-title")
-            title.set_ellipsize(Pango.EllipsizeMode.END)
-            content.pack_start(title, False, False, 0)
+            answer_text = (item.answer_text or item.subtitle or "").strip()
+            # Avoid ghosting: OpenAI titles are often the first sentence of the body.
+            title_text = (item.title or "").strip()
+            show_title = bool(title_text) and not _title_duplicates_answer(
+                title_text, answer_text
+            )
+            if show_title:
+                title = Gtk.Label(label=title_text, xalign=0)
+                title.get_style_context().add_class("result-title")
+                title.set_ellipsize(Pango.EllipsizeMode.END)
+                content.pack_start(title, False, False, 0)
+            elif item.is_loading:
+                title = Gtk.Label(label=title_text or "Looking up answer…", xalign=0)
+                title.get_style_context().add_class("result-title")
+                title.set_ellipsize(Pango.EllipsizeMode.END)
+                content.pack_start(title, False, False, 0)
 
-            answer = Gtk.Label(label=item.answer_text or item.subtitle, xalign=0)
-            answer.get_style_context().add_class("answer-body")
-            answer.set_line_wrap(True)
-            answer.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-            answer.set_max_width_chars(88)
-            content.pack_start(answer, False, False, 0)
+            if answer_text:
+                answer = Gtk.Label(label=answer_text, xalign=0)
+                answer.get_style_context().add_class("answer-body")
+                answer.set_line_wrap(True)
+                answer.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+                answer.set_max_width_chars(68)
+                content.pack_start(answer, False, False, 0)
 
-            domains: list[str] = []
-            for url in item.source_urls:
-                domain = urlparse(url).netloc.removeprefix("www.")
-                if domain and domain not in domains:
-                    domains.append(domain)
-            source_text = " · ".join(domains[:3])
-            if source_text:
-                source_text = f"Sources: {source_text}  ·  Enter to open"
+            if item.is_loading:
+                source_text = "Working…"
+            elif item.source_urls:
+                domains: list[str] = []
+                for url in item.source_urls:
+                    domain = urlparse(url).netloc.removeprefix("www.")
+                    if domain and domain not in domains:
+                        domains.append(domain)
+                source_text = (
+                    f"Sources · {' · '.join(domains[:3])} · ⏎ open"
+                    if domains
+                    else "⏎ open source"
+                )
             else:
-                source_text = "Press Enter to open source"
+                source_text = "⏎ copy / open"
             source = Gtk.Label(label=source_text, xalign=0)
             source.get_style_context().add_class("answer-source")
             source.set_ellipsize(Pango.EllipsizeMode.END)
             content.pack_start(source, False, False, 0)
+            row.add(content)
         else:
             row.get_style_context().add_class("result-row")
+            row.set_size_request(-1, self._theme.result_height)
+            layout = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+            layout.get_style_context().add_class("result-inner")
+            layout.set_valign(Gtk.Align.CENTER)
+
+            if self._config.show_icons:
+                icon = Gtk.Image.new_from_icon_name(item.icon_name, Gtk.IconSize.DND)
+                icon.set_pixel_size(24)
+                icon.set_valign(Gtk.Align.CENTER)
+                icon.get_style_context().add_class("result-icon")
+                layout.pack_start(icon, False, False, 0)
+
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            text.set_valign(Gtk.Align.CENTER)
 
             title = Gtk.Label(label=item.title, xalign=0)
             title.get_style_context().add_class("result-title")
             title.set_ellipsize(Pango.EllipsizeMode.END)
-            content.pack_start(title, False, False, 0)
+            text.pack_start(title, False, False, 0)
 
             subtitle_text = item.subtitle or item.path
             if subtitle_text:
                 subtitle = Gtk.Label(label=subtitle_text, xalign=0)
                 subtitle.get_style_context().add_class("result-subtitle")
                 subtitle.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-                content.pack_start(subtitle, False, False, 0)
+                text.pack_start(subtitle, False, False, 0)
 
-        if self._config.show_icons and not item.is_instant_answer:
-            layout = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-            icon = Gtk.Image.new_from_icon_name(item.icon_name, Gtk.IconSize.DIALOG)
-            icon.set_pixel_size(28)
-            icon.get_style_context().add_class("result-icon")
-            layout.pack_start(icon, False, False, 0)
-            layout.pack_start(content, True, True, 0)
+            layout.pack_start(text, True, True, 0)
             row.add(layout)
-        else:
-            row.add(content)
+
         row.connect("button-press-event", self._on_row_pressed, index)
         return row
 
@@ -504,9 +557,11 @@ class LauncherWindow(Gtk.Window):
         self._clear_result_rows()
         if not self._results:
             self._results_panel.hide()
+            self._header.get_style_context().add_class("collapsed")
             self._resize_window()
             return
 
+        self._header.get_style_context().remove_class("collapsed")
         for index, item in enumerate(self._results):
             row = self._build_result_row(index, item)
             self._results_box.pack_start(row, False, False, 0)
@@ -514,6 +569,8 @@ class LauncherWindow(Gtk.Window):
 
         self._results_panel.show()
         self._results_box.show_all()
+        if self._config.show_keyboard_hints:
+            self._footer.show()
         self._resize_window()
         self._select_row(self._selected_index)
 

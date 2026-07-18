@@ -186,6 +186,8 @@ through a shell.
 
 Open **Tray → Preferences** to configure:
 
+- Theme: **Raycast Dark**, **Spotlight Light**, or **Dracula**
+- Keyboard hints under results
 - OpenAI live answers and web search
 - Clipboard history
 - Privacy-safe local metrics

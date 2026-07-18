@@ -9,6 +9,7 @@ from gi.repository import Gtk
 
 from ..configuration.configuration import Configuration
 from ..platform.file_index import file_index_status, refresh_file_index
+from .theme import THEMES
 
 
 class PreferencesWindow(Gtk.Dialog):
@@ -21,7 +22,7 @@ class PreferencesWindow(Gtk.Dialog):
         )
         self._config = config
         self.add_buttons(Gtk.STOCK_CANCEL, Gtk.ResponseType.CANCEL, Gtk.STOCK_OK, Gtk.ResponseType.OK)
-        self.set_default_size(520, 420)
+        self.set_default_size(520, 480)
         self.set_border_width(12)
 
         content = self.get_content_area()
@@ -29,6 +30,21 @@ class PreferencesWindow(Gtk.Dialog):
         content.pack_start(grid, True, True, 0)
 
         row = 0
+        grid.attach(Gtk.Label(label="Theme", xalign=0), 0, row, 1, 1)
+        self._theme = Gtk.ComboBoxText()
+        theme_ids = list(THEMES.keys())
+        for theme_id, theme in THEMES.items():
+            self._theme.append(theme_id, theme.label)
+        active = theme_ids.index(config.theme) if config.theme in theme_ids else 0
+        self._theme.set_active(active)
+        grid.attach(self._theme, 1, row, 1, 1)
+        row += 1
+
+        self._show_hints = Gtk.CheckButton(label="Show keyboard hints under results")
+        self._show_hints.set_active(config.show_keyboard_hints)
+        grid.attach(self._show_hints, 0, row, 2, 1)
+        row += 1
+
         self._openai_enabled = Gtk.CheckButton(label="Enable OpenAI live answers")
         self._openai_enabled.set_active(config.openai_enabled)
         grid.attach(self._openai_enabled, 0, row, 2, 1)
@@ -102,11 +118,18 @@ class PreferencesWindow(Gtk.Dialog):
             for part in self._search_paths.get_text().split(",")
             if part.strip()
         ]
+        theme_id = self._theme.get_active_id() or "raycast"
+        self._config.theme = theme_id
+        self._config.show_keyboard_hints = self._show_hints.get_active()
         self._config.openai_enabled = self._openai_enabled.get_active()
         self._config.openai_web_search = self._openai_web_search.get_active()
         self._config.clipboard_history_enabled = self._clipboard_enabled.get_active()
         self._config.usage_metrics_enabled = self._metrics_enabled.get_active()
         self._config.openai_model = self._openai_model.get_text().strip() or "gpt-4o"
         self._config.search_paths = paths or ["~"]
+
+        from .theme import apply_theme_to_config, resolve_theme
+
+        apply_theme_to_config(self._config, resolve_theme(theme_id))
         self._config.save()
         return self._config

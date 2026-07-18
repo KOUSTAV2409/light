@@ -112,6 +112,7 @@ def _extract_source_url(payload: dict) -> str:
 
 
 def _title_from_answer(query: str, answer: str) -> str:
+    """Derive a compact title from the answer (UI hides it when it duplicates the body)."""
     first_line = answer.split("\n", 1)[0].strip()
     if "." in first_line:
         head = first_line.split(".", 1)[0].strip()
