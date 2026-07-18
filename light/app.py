@@ -111,9 +111,10 @@ class LightApplication(Gtk.Application):
     def show_launcher(self) -> None:
         if not self._started or self._window is None:
             return
-        self._window.center_on_screen()
+        # Realize first so move/resize sticks; then pin the search bar in place.
         self._window.show_all()
         self._window.present()
+        self._window.center_on_screen()
         self._window.focus_search()
 
     def hide_launcher(self) -> None:

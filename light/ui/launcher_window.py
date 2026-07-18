@@ -16,7 +16,7 @@ from ..search.file_provider import file_search_loading_item
 from ..search.openai_answer_provider import RequestCancelled
 from ..search.search import SearchEngine
 from ..search.search_item import SearchItem
-from .layer_shell import center_on_screen as layer_center_on_screen, configure_launcher_window
+from .layer_shell import configure_launcher_window, place_launcher
 from .theme import build_launcher_css, resolve_theme
 
 
@@ -58,6 +58,8 @@ class LauncherWindow(Gtk.Window):
         self._pending_query = ""
         self._active_cancel_event: threading.Event | None = None
         self._css_provider = Gtk.CssProvider()
+        self._pin_x: int | None = None
+        self._pin_y: int | None = None
 
         self.set_decorated(False)
         self.set_resizable(False)
@@ -128,6 +130,7 @@ class LauncherWindow(Gtk.Window):
         self.add(outer)
 
         self.connect("key-press-event", self._on_key_pressed)
+        self.connect("map-event", self._on_map_event)
 
     def _enable_rgba(self) -> None:
         screen = self.get_screen()
@@ -159,8 +162,13 @@ class LauncherWindow(Gtk.Window):
         self._render_results()
 
     def center_on_screen(self) -> None:
+        """Recompute the stable search-bar pin and place the window."""
+        self._pin_x = None
+        self._pin_y = None
         self._resize_window()
-        layer_center_on_screen(self, self._theme.width + 16)
+
+    def _collapsed_height(self) -> int:
+        return self._theme.search_height + 16
 
     def _window_height(self) -> int:
         chrome = 16  # outer margins
@@ -188,13 +196,21 @@ class LauncherWindow(Gtk.Window):
     def _resize_window(self) -> None:
         width = self._theme.width
         height = self._window_height()
-        # Clear prior minimum so shrinking after fewer results works.
-        self.set_size_request(-1, -1)
-        self.resize(width, height)
-        self.set_size_request(width, height)
-        # Keep search bar pinned; only grow/shrink results downward.
-        if self.get_visible():
-            layer_center_on_screen(self, width + 16)
+        pinned = place_launcher(
+            self,
+            width,
+            height,
+            pin_x=self._pin_x,
+            pin_y=self._pin_y,
+            collapsed_height=self._collapsed_height(),
+        )
+        if pinned is not None and (self._pin_x is None or self._pin_y is None):
+            self._pin_x, self._pin_y = pinned
+
+    def _on_map_event(self, *_args) -> bool:
+        # GdkWindow exists now — re-apply the pin so the first frame isn't WM-centered.
+        self._resize_window()
+        return False
 
     def focus_search(self) -> None:
         self._entry.grab_focus()
