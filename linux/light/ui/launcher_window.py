@@ -224,19 +224,23 @@ class LauncherWindow(Gtk.Window):
         file_items: list[SearchItem] = []
 
         if self._engine.should_fetch_instant_answer(query):
+            from ..search.currency_provider import looks_like_currency_query
+
+            if looks_like_currency_query(query):
+                loading_subtitle = "Fetching live exchange rate…"
+            elif self._engine.uses_openai_answers:
+                loading_subtitle = "Searching the web with OpenAI…"
+            else:
+                loading_subtitle = "Fetching from Wikipedia…"
             answer_item = SearchItem(
                 title="Looking up answer…",
-                subtitle="Searching the web with OpenAI…"
-                if self._engine.uses_openai_answers
-                else "Fetching from Wikipedia",
+                subtitle=loading_subtitle,
                 is_instant_answer=True,
                 is_loading=True,
-                answer_text=(
-                    "Searching the web with OpenAI…"
-                    if self._engine.uses_openai_answers
-                    else "Fetching from Wikipedia…"
-                ),
-                icon_name="dialog-information",
+                answer_text=loading_subtitle,
+                icon_name="accessories-calculator"
+                if looks_like_currency_query(query)
+                else "dialog-information",
                 action=lambda: None,
             )
 

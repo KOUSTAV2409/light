@@ -12,6 +12,7 @@ from .action_provider import ActionSearch
 from .application_provider import ApplicationSearch
 from .calculator_provider import maybe_calculator_item
 from .clipboard_provider import ClipboardSearch
+from .currency_provider import currency_answer_item, looks_like_currency_query
 from .file_provider import search_files
 from .instant_answer_provider import fetch_instant_answer, instant_answer_item
 from .ranking import merge_ranked_results
@@ -131,9 +132,11 @@ class SearchEngine:
         return results[: self._config.result_item_limit]
 
     def should_search_files(self, query: str) -> bool:
-        """Always search files in parallel, except explicit AI-only `?` queries."""
+        """Search files in parallel, except AI-only / currency lookups."""
         query = query.strip()
         if query.startswith("?"):
+            return False
+        if looks_like_currency_query(query):
             return False
         if len(query) < 2:
             return False
@@ -162,12 +165,15 @@ class SearchEngine:
         return True
 
     def should_fetch_instant_answer(self, query: str) -> bool:
-        """Live AI for ?, questions, and short fact lookups — with local results."""
+        """Currency, ?, questions, and short fact lookups."""
         stripped = query.strip()
         if len(stripped) < 3:
             return False
         if looks_like_url(stripped):
             return False
+
+        if looks_like_currency_query(stripped):
+            return True
 
         if stripped.startswith("?"):
             return len(stripped.lstrip("?").strip()) >= 3
@@ -193,6 +199,12 @@ class SearchEngine:
         cleaned = query.strip()
         if cleaned.startswith("?"):
             cleaned = cleaned.lstrip("?").strip()
+
+        # Dedicated FX converter first (Raycast-style) — no OpenAI needed.
+        currency_item = currency_answer_item(cleaned, cancel_event=cancel_event)
+        if currency_item is not None:
+            return currency_item
+
         result = fetch_instant_answer(
             cleaned,
             self._config,

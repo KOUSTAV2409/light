@@ -102,6 +102,14 @@ AI answers are intentional, not automatic for every multi-word query:
 For fact lookups, Light shows the **live answer on top**, then matching local
 files, then Google — Raycast-style parallel results, not exclusive modes.
 
+Currency conversion is built in (Frankfurter rates, no API key):
+
+- `1 usd to inr`
+- `1 usd to rupees`
+- `100 euros in usd`
+
+Enter copies the converted amount.
+
 
 Light can answer questions like Google’s AI Overview using **OpenAI Responses API + `web_search`**.
 
